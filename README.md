@@ -7,6 +7,7 @@
 - Danbooru image fetching with local buffer and history.
 - Fastfetch integration with image logo.
 - Full-terminal slideshow mode with pause, next image, live delay changes, and cache rotation.
+- Auto-sized collage mode that fills the terminal with cached images.
 - Clickable `artist`, `copyright`, and `character` tags in kitty/OSC 8 capable terminals.
 - Click a tag to write it to `~/.config/fastfetch/waifu-tags.conf`.
 - Manual edits to `waifu-tags.conf` are detected and refresh the image buffer.
@@ -47,6 +48,8 @@ waifufetch --history all
 waifufetch-history 5
 waifufetch --slideshow
 waifufetch --slideshow --slide-delay 12
+waifufetch --collage
+waifufetch --collage 12
 ```
 
 ## Slideshow
@@ -67,6 +70,16 @@ The initial delay is configured per run:
 
 ```bash
 waifufetch --slideshow --slide-delay 10
+```
+
+## Collage
+
+`waifufetch --collage` skips fastfetch and renders only a collage of cached images. It measures the terminal size and chooses an appropriate grid automatically.
+
+You can force the number of images:
+
+```bash
+waifufetch --collage 12
 ```
 
 ## Configuration

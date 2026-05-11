@@ -24,6 +24,8 @@ DEFAULT_BUFFER_SIZE=20
 DEFAULT_SLIDE_DELAY=8
 MIN_SLIDE_DELAY=1
 MAX_SLIDE_DELAY=3600
+DEFAULT_COLLAGE_TILE_COLS=24
+DEFAULT_COLLAGE_TILE_LINES=12
 
 usage() {
     cat <<'EOF'
@@ -36,6 +38,7 @@ Usage:
   fastfetch-waifu --history [COUNT|all]
   waifufetch-history [COUNT|all]
   fastfetch-waifu --slideshow [--slide-delay SECONDS]
+  fastfetch-waifu --collage [COUNT]
   fastfetch-waifu --print-image
   fastfetch-waifu --buffer-count
   fastfetch-waifu --image-tags
@@ -54,6 +57,7 @@ Waifu options:
                        Muestra el historial de imagenes con tags y source
   --slideshow          Muestra solo la imagen en grande y la cambia en bucle
   --slide-delay SEC    Tiempo inicial entre imagenes en slideshow (default: 8)
+  --collage [COUNT]    Muestra un collage de imagenes adaptado a la terminal
   --buffer-count       Muestra cuantas imagenes hay en el buffer
   --image-tags         Muestra artist, copyright y characters de la imagen actual
   --image-tags-fastfetch
@@ -65,6 +69,8 @@ Examples:
   waifufetch --tag "1girl cat_ears" --rating g
   waifufetch --tag "1girl" --tag "blue_hair" --rating rating:g
   waifufetch --slideshow --slide-delay 12
+  waifufetch --collage
+  waifufetch --collage 12
 
 Slideshow controls:
   space  Pausa/reanuda
@@ -215,6 +221,19 @@ save_tags() {
     tags="$(build_tags)"
     mkdir -p "$CONFIG_DIR"
     printf '%s\n' "$tags" > "$TAGS_FILE"
+}
+
+temp_png() {
+    local prefix="$1"
+    local tmp
+
+    mkdir -p "$CACHE_DIR" 2>/dev/null || true
+    tmp="$(mktemp --tmpdir="$CACHE_DIR" "${prefix}.XXXXXX.png" 2>/dev/null || true)"
+    if [[ -z "$tmp" ]]; then
+        tmp="$(mktemp --tmpdir="${TMPDIR:-/tmp}" "${prefix}.XXXXXX.png")"
+    fi
+
+    printf '%s\n' "$tmp"
 }
 
 mark_active_tags() {
@@ -423,12 +442,19 @@ promote_buffer_image() {
 }
 
 refresh_buffer_async() {
+    local lock_fd
+
     mkdir -p "$CACHE_DIR" "$BUFFER_DIR"
 
+    if ! { exec {lock_fd}>"$LOCK_FILE"; } 2>/dev/null; then
+        return 0
+    fi
+
     (
-        flock -n 9 || exit 0
+        flock -n "$lock_fd" || exit 0
         fill_buffer
-    ) 9>"$LOCK_FILE" >/dev/null 2>&1 &
+    ) >/dev/null 2>&1 &
+    exec {lock_fd}>&-
 }
 
 choose_logo() {
@@ -620,12 +646,12 @@ show_history_image() {
     fi
 
     if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitten >/dev/null 2>&1 && command -v magick >/dev/null 2>&1; then
-        tmp="$(mktemp --tmpdir="$CACHE_DIR" history-thumb.XXXXXX.png)"
+        tmp="$(temp_png history-thumb)"
         magick "$image[0]" -auto-orient -resize '360x360>' "$tmp"
         kitten icat --align=left --scale-up=no --stdin=no --engine=builtin --transfer-mode=stream "$tmp" || true
         rm -f "$tmp"
     elif command -v img2sixel >/dev/null 2>&1 && command -v magick >/dev/null 2>&1; then
-        tmp="$(mktemp --tmpdir="$CACHE_DIR" history-thumb.XXXXXX.png)"
+        tmp="$(temp_png history-thumb)"
         magick "$image[0]" -auto-orient -resize '360x360>' "$tmp"
         img2sixel "$tmp" || true
         rm -f "$tmp"
@@ -862,6 +888,214 @@ run_slideshow() {
     done
 }
 
+terminal_cells() {
+    local cols lines
+
+    cols="$(tput cols 2>/dev/null || printf '80')"
+    lines="$(tput lines 2>/dev/null || printf '24')"
+
+    if [[ ! "$cols" =~ ^[0-9]+$ || "$cols" -lt 1 ]]; then
+        cols=80
+    fi
+    if [[ ! "$lines" =~ ^[0-9]+$ || "$lines" -lt 1 ]]; then
+        lines=24
+    fi
+
+    printf '%s %s\n' "$cols" "$lines"
+}
+
+terminal_pixels() {
+    local cols="$1"
+    local lines="$2"
+    local size width height
+
+    if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitten >/dev/null 2>&1 && [[ -t 1 ]]; then
+        size="$(kitten icat --print-window-size --stdin=no 2>/dev/null || true)"
+        width="${size%x*}"
+        height="${size#*x}"
+        if [[ "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ && "$width" -gt 0 && "$height" -gt 0 ]]; then
+            printf '%s %s\n' "$width" "$height"
+            return 0
+        fi
+    fi
+
+    printf '%s %s\n' "$((cols * 10))" "$((lines * 20))"
+}
+
+normalize_collage_count() {
+    local count="$1"
+
+    if [[ "$count" =~ ^[0-9]+$ && "$count" -ge 1 && "$count" -le 100 ]]; then
+        printf '%s\n' "$count"
+    else
+        printf 'Invalid collage count: %s\n' "$count" >&2
+        printf 'Use a number from 1 to 100.\n' >&2
+        exit 2
+    fi
+}
+
+auto_collage_count() {
+    local cols="$1"
+    local lines="$2"
+    local grid_cols grid_rows count
+
+    grid_cols=$((cols / DEFAULT_COLLAGE_TILE_COLS))
+    grid_rows=$((lines / DEFAULT_COLLAGE_TILE_LINES))
+    if [[ "$grid_cols" -lt 1 ]]; then
+        grid_cols=1
+    fi
+    if [[ "$grid_rows" -lt 1 ]]; then
+        grid_rows=1
+    fi
+
+    count=$((grid_cols * grid_rows))
+    if [[ "$count" -gt "$BUFFER_SIZE" ]]; then
+        count="$BUFFER_SIZE"
+    fi
+
+    printf '%s\n' "$count"
+}
+
+collage_grid() {
+    local count="$1"
+    local cols="$2"
+    local lines="$3"
+    local grid_cols grid_rows
+
+    grid_cols=$((cols / DEFAULT_COLLAGE_TILE_COLS))
+    if [[ "$grid_cols" -lt 1 ]]; then
+        grid_cols=1
+    fi
+    if [[ "$grid_cols" -gt "$count" ]]; then
+        grid_cols="$count"
+    fi
+
+    grid_rows=$(((count + grid_cols - 1) / grid_cols))
+    while [[ "$grid_rows" -gt 1 && "$((lines / grid_rows))" -lt 8 ]]; do
+        grid_cols=$((grid_cols + 1))
+        grid_rows=$(((count + grid_cols - 1) / grid_cols))
+    done
+
+    printf '%s %s\n' "$grid_cols" "$grid_rows"
+}
+
+collage_images() {
+    local limit="$1"
+
+    {
+        if [[ -s "$CURRENT_IMAGE" ]]; then
+            readlink -f "$CURRENT_IMAGE"
+        fi
+        history_images all
+        if [[ -d "$BUFFER_DIR" ]]; then
+            find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' -printf '%T@ %p\n' 2>/dev/null \
+                | sort -rn \
+                | awk '{print $2}'
+        fi
+    } | awk '!seen[$0]++' | awk -v limit="$limit" 'NR <= limit {print}'
+}
+
+build_collage() {
+    local count="$1"
+    local cols lines width height grid_cols grid_rows tile_w tile_h output image
+    local images=()
+
+    if ! command -v magick >/dev/null 2>&1; then
+        printf 'Collage needs ImageMagick: magick not found.\n' >&2
+        exit 1
+    fi
+
+    read -r cols lines < <(terminal_cells)
+    if [[ "$count" == "auto" ]]; then
+        count="$(auto_collage_count "$cols" "$lines")"
+    else
+        count="$(normalize_collage_count "$count")"
+    fi
+
+    while IFS= read -r image; do
+        [[ -s "$image" ]] || continue
+        images+=("$image")
+    done < <(collage_images "$count")
+
+    if [[ "${#images[@]}" -eq 0 ]]; then
+        if download_waifu "$NEXT_IMAGE" "$NEXT_URL" && promote_next_image; then
+            images+=("$(choose_logo)")
+        else
+            printf 'No cached waifufetch images available for collage.\n' >&2
+            exit 1
+        fi
+    fi
+
+    count="${#images[@]}"
+    read -r width height < <(terminal_pixels "$cols" "$lines")
+    read -r grid_cols grid_rows < <(collage_grid "$count" "$cols" "$lines")
+
+    tile_w=$((width / grid_cols))
+    tile_h=$((height / grid_rows))
+    if [[ "$tile_w" -lt 1 ]]; then
+        tile_w=1
+    fi
+    if [[ "$tile_h" -lt 1 ]]; then
+        tile_h=1
+    fi
+
+    output="$(temp_png collage)"
+    if ! magick montage "${images[@]}" \
+        -auto-orient \
+        -thumbnail "${tile_w}x${tile_h}^" \
+        -gravity center \
+        -extent "${tile_w}x${tile_h}" \
+        -tile "${grid_cols}x${grid_rows}" \
+        -geometry "${tile_w}x${tile_h}+0+0" \
+        -background black \
+        "$output"; then
+        rm -f "$output"
+        printf 'Failed to build collage image.\n' >&2
+        exit 1
+    fi
+
+    if [[ ! -s "$output" ]]; then
+        rm -f "$output"
+        printf 'Failed to build collage image: empty output.\n' >&2
+        exit 1
+    fi
+
+    printf '%s\n' "$output"
+}
+
+show_collage() {
+    local count="$1"
+    local output cols lines
+
+    mkdir -p "$CACHE_DIR"
+    output="$(build_collage "$count")"
+
+    if [[ -t 1 ]]; then
+        printf '\033[2J\033[H\033[?25l'
+        if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitten >/dev/null 2>&1; then
+            read -r cols lines < <(terminal_cells)
+            kitten icat --clear --stdin=no >/dev/null 2>&1 || true
+            kitten icat \
+                --align=center \
+                --place "${cols}x${lines}@0x0" \
+                --scale-up=no \
+                --stdin=no \
+                --engine=builtin \
+                --transfer-mode=stream \
+                "$output" || printf 'collage: %s\n' "$output"
+        elif command -v img2sixel >/dev/null 2>&1; then
+            img2sixel "$output" || printf 'collage: %s\n' "$output"
+        else
+            printf 'collage: %s\n' "$output"
+        fi
+        printf '\033[?25h\033[0m\n'
+    else
+        printf '%s\n' "$output"
+    fi
+
+    refresh_buffer_async
+}
+
 TAG_OVERRIDE=""
 RATING_OVERRIDE=""
 RATING_OVERRIDE_SET=0
@@ -869,6 +1103,8 @@ BUFFER_SIZE_OVERRIDE=""
 REFRESH_ONLY=0
 SHOW_SLIDESHOW=0
 SLIDE_DELAY="$DEFAULT_SLIDE_DELAY"
+SHOW_COLLAGE=0
+COLLAGE_COUNT="auto"
 PRINT_IMAGE=0
 PRINT_BUFFER_COUNT=0
 PRINT_IMAGE_TAGS=0
@@ -895,6 +1131,20 @@ while [[ $# -gt 0 ]]; do
             ;;
         --slideshow)
             SHOW_SLIDESHOW=1
+            shift
+            ;;
+        --collage)
+            SHOW_COLLAGE=1
+            if [[ -n "${2:-}" && "$2" != -* ]]; then
+                COLLAGE_COUNT="$2"
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        --collage=*)
+            SHOW_COLLAGE=1
+            COLLAGE_COUNT="${1#*=}"
             shift
             ;;
         --slide-delay)
@@ -999,10 +1249,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "$SHOW_COLLAGE" -eq 1 && "$COLLAGE_COUNT" != "auto" ]]; then
+    COLLAGE_COUNT="$(normalize_collage_count "$COLLAGE_COUNT")"
+fi
+
 if [[ "$BUFFER_SIZE_CHANGED" -eq 1 ]]; then
     save_buffer_size "$BUFFER_SIZE_OVERRIDE"
     cleanup_cache
-    if [[ "$REFRESH_ONLY" -eq 0 && "$SHOW_SLIDESHOW" -eq 0 && "$TAGS_CHANGED" -eq 0 && "${#FASTFETCH_ARGS[@]}" -eq 0 ]]; then
+    if [[ "$REFRESH_ONLY" -eq 0 && "$SHOW_SLIDESHOW" -eq 0 && "$SHOW_COLLAGE" -eq 0 && "$TAGS_CHANGED" -eq 0 && "${#FASTFETCH_ARGS[@]}" -eq 0 ]]; then
         printf 'Buffer size set to %s. History limit set to %s.\n' "$BUFFER_SIZE" "$BUFFER_SIZE"
         exit 0
     fi
@@ -1065,6 +1319,11 @@ if [[ "$REFRESH_ONLY" -eq 1 ]]; then
     exit 0
 fi
 
+if [[ "$SHOW_COLLAGE" -eq 1 ]]; then
+    show_collage "$COLLAGE_COUNT"
+    exit 0
+fi
+
 if [[ ! -s "$CURRENT_IMAGE" && "$FORCED_REFRESH" -eq 1 ]]; then
     download_waifu "$NEXT_IMAGE" "$NEXT_URL" >/dev/null 2>&1 || true
     promote_next_image >/dev/null 2>&1 || true
@@ -1072,7 +1331,7 @@ fi
 
 if [[ "$FORCED_REFRESH" -eq 0 ]]; then
     FASTFETCH_WAIFU_BUFFER="$(buffer_count)/$BUFFER_SIZE"
-    if [[ "$SHOW_SLIDESHOW" -eq 0 ]]; then
+    if [[ "$SHOW_SLIDESHOW" -eq 0 && "$SHOW_COLLAGE" -eq 0 ]]; then
         promote_buffer_image >/dev/null 2>&1 || true
         cleanup_cache
         refresh_buffer_async
