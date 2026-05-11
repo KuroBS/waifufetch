@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+uri="${1:-}"
+
+if [[ "$uri" != waifufetch-tag://set?tag=* ]]; then
+    exit 2
+fi
+
+encoded_tag="${uri#waifufetch-tag://set?tag=}"
+tag="$(jq -nr --arg tag "$encoded_tag" '$tag|@urid')"
+
+if [[ -z "$tag" || "$tag" =~ [[:space:]] ]]; then
+    exit 2
+fi
+
+config_dir="$HOME/.config/fastfetch"
+tags_file="$config_dir/waifu-tags.conf"
+buffer_dir="$HOME/.cache/fastfetch/waifus/buffer"
+
+mkdir -p "$config_dir"
+printf '%s\n' "$tag" > "$tags_file"
+
+if [[ -d "$buffer_dir" ]]; then
+    find "$buffer_dir" -maxdepth 1 -type f \( -name '*.png' -o -name '*.url' -o -name '*.tags' \) -delete 2>/dev/null || true
+fi
+
+nohup "$HOME/.config/fastfetch/fastfetch-waifu" --refresh-only >/dev/null 2>&1 &

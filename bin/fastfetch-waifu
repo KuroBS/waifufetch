@@ -1,0 +1,1098 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+CONFIG_DIR="$HOME/.config/fastfetch"
+TAGS_FILE="$CONFIG_DIR/waifu-tags.conf"
+AUTH_FILE="$CONFIG_DIR/danbooru-auth.conf"
+BUFFER_SIZE_FILE="$CONFIG_DIR/waifu-buffer-size.conf"
+CACHE_DIR="$HOME/.cache/fastfetch/waifus"
+CURRENT_IMAGE="$CACHE_DIR/current.png"
+NEXT_IMAGE="$CACHE_DIR/next.png"
+NEXT_URL="$CACHE_DIR/next.url"
+LOCK_FILE="$CACHE_DIR/refresh.lock"
+BUFFER_DIR="$CACHE_DIR/buffer"
+ACTIVE_TAGS_FILE="$CACHE_DIR/active-tags.conf"
+FALLBACK_IMAGE="$HOME/.config/ml4w/assets/ml4w.png"
+API_URL="https://danbooru.donmai.us/posts.json"
+USER_AGENT="fastfetch-waifu/1.0"
+COMMAND_NAME="$(basename "$0")"
+CURL_CONNECT_TIMEOUT=3
+CURL_API_MAX_TIME=12
+CURL_IMAGE_MAX_TIME=45
+DEFAULT_BUFFER_SIZE=20
+DEFAULT_SLIDE_DELAY=8
+MIN_SLIDE_DELAY=1
+MAX_SLIDE_DELAY=3600
+
+usage() {
+    cat <<'EOF'
+Usage:
+  fastfetch-waifu [waifu options...] [fastfetch options...]
+  waifufetch [waifu options...] [fastfetch options...]
+  fastfetch-waifu [waifu options...] --prefetch-buffer
+  fastfetch-waifu [waifu options...] --refresh-only
+  fastfetch-waifu --open-source
+  fastfetch-waifu --history [COUNT|all]
+  waifufetch-history [COUNT|all]
+  fastfetch-waifu --slideshow [--slide-delay SECONDS]
+  fastfetch-waifu --print-image
+  fastfetch-waifu --buffer-count
+  fastfetch-waifu --image-tags
+  fastfetch-waifu --image-tags-fastfetch
+
+Waifu options:
+  -t, --tag TAGS       Cambia los tags de Danbooru y los guarda
+                       Se puede repetir: --tag 1girl --tag cat_ears
+  -r, --rating RATING  Cambia el rating y lo guarda: g, s, q, e o rating:g
+                       Usa --rating "" para borrar el rating guardado
+  --buffer-size SIZE   Cambia el tamano del buffer y del historial
+  --prefetch-buffer    Precarga el buffer hasta el tamano configurado y no muestra fastfetch
+  --refresh-only       Alias compatible de --prefetch-buffer
+  --open-source        Abre el source actual en Google Chrome
+  --history [COUNT|all]
+                       Muestra el historial de imagenes con tags y source
+  --slideshow          Muestra solo la imagen en grande y la cambia en bucle
+  --slide-delay SEC    Tiempo inicial entre imagenes en slideshow (default: 8)
+  --buffer-count       Muestra cuantas imagenes hay en el buffer
+  --image-tags         Muestra artist, copyright y characters de la imagen actual
+  --image-tags-fastfetch
+                       Muestra tags con filas extra alineadas para fastfetch
+
+Examples:
+  waifufetch --tag "1girl cat_ears"
+  waifufetch --rating s
+  waifufetch --tag "1girl cat_ears" --rating g
+  waifufetch --tag "1girl" --tag "blue_hair" --rating rating:g
+  waifufetch --slideshow --slide-delay 12
+
+Slideshow controls:
+  space  Pausa/reanuda
+  n      Imagen siguiente
+  + / -  Sube/baja el tiempo entre imagenes
+  o      Abre el source actual
+  q      Sale
+
+Cuando usas --tag, --rating o ambos, waifufetch actualiza:
+  ~/.config/fastfetch/waifu-tags.conf
+Después descarga una imagen nueva y muestra fastfetch con esa imagen.
+
+Tags:
+  Edit ~/.config/fastfetch/waifu-tags.conf
+  Default is SFW: 1girl rating:g
+  Anonymous Danbooru searches are limited, so keep this to 2 tags unless you add auth.
+
+Auth:
+  Create ~/.config/fastfetch/danbooru-auth.conf with:
+    DANBOORU_LOGIN='your_username'
+    DANBOORU_API_KEY='your_api_key'
+  Then run: chmod 600 ~/.config/fastfetch/danbooru-auth.conf
+
+waifufetch rotates through a local image buffer immediately and refills it in the background.
+EOF
+}
+
+load_auth() {
+    DANBOORU_LOGIN="${DANBOORU_LOGIN:-}"
+    DANBOORU_API_KEY="${DANBOORU_API_KEY:-}"
+
+    if [[ -f "$AUTH_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$AUTH_FILE"
+    fi
+}
+
+read_tags() {
+    if [[ -f "$TAGS_FILE" ]]; then
+        sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' "$TAGS_FILE" | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+    else
+        printf '%s\n' "1girl rating:g"
+    fi
+}
+
+read_buffer_size() {
+    local size
+
+    if [[ -f "$BUFFER_SIZE_FILE" ]]; then
+        size="$(sed -n 's/^[[:space:]]*BUFFER_SIZE[[:space:]]*=[[:space:]]*//p' "$BUFFER_SIZE_FILE" | tail -n 1)"
+        size="${size:-$(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' "$BUFFER_SIZE_FILE" | tail -n 1)}"
+    else
+        size="$DEFAULT_BUFFER_SIZE"
+    fi
+
+    if [[ "$size" =~ ^[0-9]+$ && "$size" -ge 1 && "$size" -le 100 ]]; then
+        printf '%s\n' "$size"
+    else
+        printf '%s\n' "$DEFAULT_BUFFER_SIZE"
+    fi
+}
+
+normalize_buffer_size() {
+    local size="$1"
+
+    if [[ "$size" =~ ^[0-9]+$ && "$size" -ge 1 && "$size" -le 100 ]]; then
+        printf '%s\n' "$size"
+    else
+        printf 'Invalid buffer size: %s\n' "$size" >&2
+        printf 'Use a number from 1 to 100.\n' >&2
+        exit 2
+    fi
+}
+
+save_buffer_size() {
+    local size="$1"
+
+    size="$(normalize_buffer_size "$size")"
+    mkdir -p "$CONFIG_DIR"
+    printf 'BUFFER_SIZE=%s\n' "$size" > "$BUFFER_SIZE_FILE"
+    BUFFER_SIZE="$size"
+}
+
+strip_rating_tags() {
+    local tags="$1"
+
+    sed -E 's/(^|[[:space:]])rating:[^[:space:]]+//g; s/^[[:space:]]+//; s/[[:space:]]+$//' <<<"$tags"
+}
+
+last_rating_tag() {
+    local tags="$1"
+
+    { grep -Eo '(^|[[:space:]])rating:[^[:space:]]+' <<<"$tags" || true; } | sed 's/^[[:space:]]*//' | tail -n 1
+}
+
+normalize_rating() {
+    local rating="$1"
+
+    rating="${rating#rating:}"
+    case "$rating" in
+        g|s|q|e)
+            printf 'rating:%s\n' "$rating"
+            ;;
+        *)
+            printf 'Invalid rating: %s\n' "$1" >&2
+            printf 'Use one of: g, s, q, e, rating:g, rating:s, rating:q, rating:e\n' >&2
+            exit 2
+            ;;
+    esac
+}
+
+build_tags() {
+    local config_tags config_rating tags rating
+
+    config_tags="$(read_tags)"
+
+    if [[ -n "${TAG_OVERRIDE:-}" ]]; then
+        tags="$TAG_OVERRIDE"
+        config_rating="$(last_rating_tag "$config_tags")"
+        if [[ -z "$config_rating" ]]; then
+            config_rating="rating:g"
+        fi
+        if [[ "$tags" != *rating:* && -n "$config_rating" ]]; then
+            tags="$tags $config_rating"
+        fi
+    else
+        tags="$config_tags"
+    fi
+
+    if [[ -z "$tags" ]]; then
+        tags="1girl rating:g"
+    fi
+
+    if [[ "${RATING_OVERRIDE_SET:-0}" -eq 1 ]]; then
+        tags="$(strip_rating_tags "$tags")"
+        if [[ -n "${RATING_OVERRIDE:-}" ]]; then
+            rating="$(normalize_rating "$RATING_OVERRIDE")"
+            tags="${tags:+$tags }$rating"
+        fi
+    fi
+
+    printf '%s\n' "$tags"
+}
+
+save_tags() {
+    local tags
+
+    tags="$(build_tags)"
+    mkdir -p "$CONFIG_DIR"
+    printf '%s\n' "$tags" > "$TAGS_FILE"
+}
+
+mark_active_tags() {
+    mkdir -p "$CACHE_DIR"
+    read_tags > "$ACTIVE_TAGS_FILE"
+}
+
+tags_config_changed() {
+    local current_tags active_tags
+
+    current_tags="$(read_tags)"
+    if [[ -f "$ACTIVE_TAGS_FILE" ]]; then
+        active_tags="$(cat "$ACTIVE_TAGS_FILE")"
+    else
+        active_tags=""
+    fi
+
+    [[ "$current_tags" != "$active_tags" ]]
+}
+
+write_post_tags() {
+    local post="$1"
+    local tags_output="$2"
+    local artist_tags copyright_tags character_tags
+
+    artist_tags="$(jq -r '.tag_string_artist // empty' <<<"$post")"
+    copyright_tags="$(jq -r '.tag_string_copyright // empty' <<<"$post")"
+    character_tags="$(jq -r '.tag_string_character // empty' <<<"$post")"
+
+    jq -n \
+        --arg artist "$artist_tags" \
+        --arg copyright "$copyright_tags" \
+        --arg characters "$character_tags" \
+        '{artist: $artist, copyright: $copyright, characters: $characters}' > "$tags_output"
+}
+
+fetch_tags_for_logo() {
+    local logo="$1"
+    local url_file="${logo%.*}.url"
+    local tags_file="${logo%.*}.tags"
+    local post_url post_id url post
+
+    if [[ -s "$tags_file" ]] && jq -e 'has("copyright")' "$tags_file" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [[ ! -s "$url_file" ]]; then
+        return 0
+    fi
+
+    post_url="$(cat "$url_file")"
+    post_id="$(sed -nE 's#^.*/posts/([0-9]+).*#\1#p' <<<"$post_url")"
+    if [[ -z "$post_id" ]]; then
+        return 1
+    fi
+
+    load_auth
+    url="https://danbooru.donmai.us/posts/${post_id}.json"
+    if [[ -n "${DANBOORU_LOGIN:-}" && -n "${DANBOORU_API_KEY:-}" ]]; then
+        url="${url}?login=$(jq -rn --arg v "$DANBOORU_LOGIN" '$v|@uri')&api_key=$(jq -rn --arg v "$DANBOORU_API_KEY" '$v|@uri')"
+    fi
+
+    post="$(curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_API_MAX_TIME" -A "$USER_AGENT" "$url")" || return 1
+    write_post_tags "$post" "$tags_file"
+}
+
+download_waifu() {
+    local output="${1:-$CURRENT_IMAGE}"
+    local url_output="${2:-${output%.*}.url}"
+    local tags_output="${output%.*}.tags"
+    local tags encoded response post image_url post_id post_url tmp url
+
+    mkdir -p "$CACHE_DIR"
+    load_auth
+    tags="$(build_tags)"
+
+    encoded="$(jq -rn --arg tags "$tags" '$tags|@uri')"
+    url="${API_URL}?limit=20&random=true&tags=${encoded}"
+    if [[ -n "${DANBOORU_LOGIN:-}" && -n "${DANBOORU_API_KEY:-}" ]]; then
+        url="${url}&login=$(jq -rn --arg v "$DANBOORU_LOGIN" '$v|@uri')&api_key=$(jq -rn --arg v "$DANBOORU_API_KEY" '$v|@uri')"
+    fi
+
+    response="$(curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_API_MAX_TIME" -A "$USER_AGENT" "$url")"
+    post="$(jq -c '
+        [.[] | select(
+            (.file_url // "") != "" and
+            (.file_ext | IN("jpg", "jpeg", "png", "webp", "gif"))
+        )][0] // empty
+    ' <<<"$response")"
+    image_url="$(jq -r '.large_file_url // .file_url // empty' <<<"$post")"
+    post_id="$(jq -r '.id // empty' <<<"$post")"
+
+    if [[ -z "$image_url" || -z "$post_id" ]]; then
+        return 1
+    fi
+    post_url="https://danbooru.donmai.us/posts/${post_id}"
+
+    tmp="$(mktemp --tmpdir="$CACHE_DIR" waifu.XXXXXX)"
+    if ! curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_IMAGE_MAX_TIME" -A "$USER_AGENT" "$image_url" -o "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! magick "$tmp[0]" -auto-orient -resize '1050x1050>' "$output"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    printf '%s\n' "$post_url" > "$url_output"
+    write_post_tags "$post" "$tags_output"
+    rm -f "$tmp"
+}
+
+cleanup_cache() {
+    find "$CACHE_DIR" -maxdepth 1 -type f -name 'waifu.*' -delete 2>/dev/null || true
+
+    find "$CACHE_DIR" -maxdepth 1 -type f -name 'current-*.png' -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn \
+        | awk -v keep="$BUFFER_SIZE" 'NR > keep {print $2}' \
+        | while IFS= read -r old_image; do
+            rm -f "$old_image" "${old_image%.*}.url" "${old_image%.*}.tags"
+        done
+}
+
+clear_buffer() {
+    if [[ -d "$BUFFER_DIR" ]]; then
+        find "$BUFFER_DIR" -maxdepth 1 -type f \( -name '*.png' -o -name '*.url' -o -name '*.tags' \) -delete 2>/dev/null || true
+    fi
+}
+
+buffer_count() {
+    if [[ ! -d "$BUFFER_DIR" ]]; then
+        printf '0\n'
+        return 0
+    fi
+
+    find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' -exec sh -c '
+        count=0
+        for image do
+            [ -s "$image" ] && [ -s "${image%.*}.url" ] && count=$((count + 1))
+        done
+        printf "%s\n" "$count"
+    ' sh {} + 2>/dev/null || printf '0\n'
+}
+
+fill_buffer() {
+    local count output url_output
+
+    mkdir -p "$BUFFER_DIR"
+    count="$(buffer_count)"
+    count="${count:-0}"
+
+    while [[ "$count" -lt "$BUFFER_SIZE" ]]; do
+        output="$BUFFER_DIR/waifu-$(date +%s%N).png"
+        url_output="${output%.*}.url"
+
+        if ! download_waifu "$output" "$url_output"; then
+            rm -f "$output" "$url_output"
+            return 1
+        fi
+
+        count=$((count + 1))
+    done
+
+    mark_active_tags
+}
+
+promote_file_as_current() {
+    local image="$1"
+    local url_file="${image%.*}.url"
+    local tags_file="${image%.*}.tags"
+    local unique unique_url unique_tags
+
+    if [[ ! -s "$image" || ! -s "$url_file" ]]; then
+        return 1
+    fi
+
+    unique="$CACHE_DIR/current-$(date +%s%N).png"
+    unique_url="${unique%.*}.url"
+    unique_tags="${unique%.*}.tags"
+    mv "$image" "$unique"
+    mv "$url_file" "$unique_url"
+    if [[ -s "$tags_file" ]]; then
+        mv "$tags_file" "$unique_tags"
+    fi
+    ln -sfn "$unique" "$CURRENT_IMAGE"
+}
+
+promote_buffer_image() {
+    local image
+
+    if [[ ! -d "$BUFFER_DIR" ]]; then
+        return 1
+    fi
+
+    while IFS= read -r image; do
+        if [[ -s "$image" && -s "${image%.*}.url" ]]; then
+            promote_file_as_current "$image"
+            return $?
+        fi
+    done < <(
+        find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' -printf '%T@ %p\n' 2>/dev/null \
+            | sort -n \
+            | awk '{print $2}' || true
+    )
+
+    return 1
+}
+
+refresh_buffer_async() {
+    mkdir -p "$CACHE_DIR" "$BUFFER_DIR"
+
+    (
+        flock -n 9 || exit 0
+        fill_buffer
+    ) 9>"$LOCK_FILE" >/dev/null 2>&1 &
+}
+
+choose_logo() {
+    if [[ -s "$CURRENT_IMAGE" ]]; then
+        readlink -f "$CURRENT_IMAGE"
+    else
+        printf '%s\n' "$FALLBACK_IMAGE"
+    fi
+}
+
+promote_next_image() {
+    local unique unique_url unique_tags
+
+    if [[ ! -s "$NEXT_IMAGE" || ! -s "$NEXT_URL" ]]; then
+        return 1
+    fi
+
+    unique="$CACHE_DIR/current-$(date +%s%N).png"
+    unique_url="${unique%.*}.url"
+    unique_tags="${unique%.*}.tags"
+    cp "$NEXT_IMAGE" "$unique"
+    cp "$NEXT_URL" "$unique_url"
+    if [[ -s "${NEXT_IMAGE%.*}.tags" ]]; then
+        cp "${NEXT_IMAGE%.*}.tags" "$unique_tags"
+    fi
+    ln -sfn "$unique" "$CURRENT_IMAGE"
+}
+
+post_url_for_logo() {
+    local logo="$1"
+    local url_file="${logo%.*}.url"
+
+    if [[ -s "$url_file" ]]; then
+        cat "$url_file"
+    fi
+}
+
+tags_for_logo() {
+    local logo="$1"
+    local tags_file="${logo%.*}.tags"
+    local artist copyright characters
+
+    fetch_tags_for_logo "$logo" >/dev/null 2>&1 || true
+
+    if [[ ! -s "$tags_file" ]]; then
+        printf 'artist: -\n'
+        printf 'copyright: -\n'
+        printf 'characters: -\n'
+        return 0
+    fi
+
+    artist="$(jq -r '.artist // empty' "$tags_file")"
+    copyright="$(jq -r '.copyright // empty' "$tags_file")"
+    characters="$(jq -r '.characters // empty' "$tags_file")"
+
+    if [[ -n "$artist" ]]; then
+        tr ' ' '\n' <<<"$artist" | sed 's/^/artist: /'
+    else
+        printf 'artist: -\n'
+    fi
+
+    if [[ -n "$copyright" ]]; then
+        tr ' ' '\n' <<<"$copyright" | sed 's/^/copyright: /'
+    else
+        printf 'copyright: -\n'
+    fi
+
+    if [[ -n "$characters" ]]; then
+        tr ' ' '\n' <<<"$characters" | sed 's/^/characters: /'
+    else
+        printf 'characters: -\n'
+    fi
+}
+
+tag_link() {
+    local tag="$1"
+    local encoded
+
+    if [[ -z "$tag" || "$tag" == "-" ]]; then
+        printf '%s' "$tag"
+        return 0
+    fi
+
+    encoded="$(jq -rn --arg tag "$tag" '$tag|@uri')"
+    printf '\033]8;;waifufetch-tag://set?tag=%s\033\\%s\033]8;;\033\\' "$encoded" "$tag"
+}
+
+fastfetch_text_column() {
+    local width left right
+
+    width="$(sed -nE 's/^[[:space:]]*"width"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" | head -n 1)"
+    left="$(sed -nE 's/^[[:space:]]*"left"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" | head -n 1)"
+    right="$(sed -nE 's/^[[:space:]]*"right"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" | head -n 1)"
+
+    if [[ "$width" =~ ^[0-9]+$ && "$left" =~ ^[0-9]+$ && "$right" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$((width + left + right))"
+    else
+        printf '37\n'
+    fi
+}
+
+tags_for_fastfetch() {
+    local line kind value linked_value text_column first=1
+
+    text_column="$(fastfetch_text_column)"
+
+    while IFS= read -r line; do
+        kind="${line%%:*}"
+        value="${line#*: }"
+        linked_value="$(tag_link "$value")"
+
+        case "$kind" in
+            artist)
+                kind="artist   "
+                ;;
+            copyright)
+                kind="copyright"
+                ;;
+            characters)
+                kind="character"
+                ;;
+            *)
+                kind="tag      "
+                value="$line"
+                ;;
+        esac
+
+        if [[ "$first" -eq 1 ]]; then
+            printf '%s' "$linked_value"
+            first=0
+        else
+            printf '\n\033[%sC│ \033[34m󰓹 %s\033[0m│ %s' "$text_column" "$kind" "$linked_value"
+        fi
+    done < <(
+        if [[ -n "${FASTFETCH_WAIFU_TAGS:-}" ]]; then
+            printf '%s\n' "$FASTFETCH_WAIFU_TAGS"
+        else
+            tags_for_logo "$(choose_logo)"
+        fi
+    )
+}
+
+open_source_url() {
+    local logo url
+
+    logo="$(choose_logo)"
+    url="$(post_url_for_logo "$logo")"
+
+    if [[ -z "$url" ]]; then
+        printf 'No source URL available for current image.\n' >&2
+        exit 1
+    fi
+
+    if command -v google-chrome-stable >/dev/null 2>&1; then
+        nohup google-chrome-stable "$url" >/dev/null 2>&1 &
+    elif command -v google-chrome >/dev/null 2>&1; then
+        nohup google-chrome "$url" >/dev/null 2>&1 &
+    elif command -v xdg-open >/dev/null 2>&1; then
+        nohup xdg-open "$url" >/dev/null 2>&1 &
+    elif command -v gio >/dev/null 2>&1; then
+        nohup gio open "$url" >/dev/null 2>&1 &
+    else
+        printf 'No opener found. Install xdg-utils or open manually: %s\n' "$url" >&2
+        exit 1
+    fi
+}
+
+history_images() {
+    local limit="$1"
+
+    if [[ "$limit" == "all" ]]; then
+        find "$CACHE_DIR" -maxdepth 1 -type f -name 'current-*.png' -printf '%T@ %p\n' 2>/dev/null \
+            | sort -rn \
+            | awk '{print $2}'
+    else
+        find "$CACHE_DIR" -maxdepth 1 -type f -name 'current-*.png' -printf '%T@ %p\n' 2>/dev/null \
+            | sort -rn \
+            | awk -v limit="$limit" 'NR <= limit {print $2}'
+    fi
+}
+
+show_history_image() {
+    local image="$1"
+    local tmp
+
+    if [[ ! -t 1 ]]; then
+        printf 'image: %s\n' "$image"
+        return 0
+    fi
+
+    if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitten >/dev/null 2>&1 && command -v magick >/dev/null 2>&1; then
+        tmp="$(mktemp --tmpdir="$CACHE_DIR" history-thumb.XXXXXX.png)"
+        magick "$image[0]" -auto-orient -resize '360x360>' "$tmp"
+        kitten icat --align=left --scale-up=no --stdin=no --engine=builtin --transfer-mode=stream "$tmp" || true
+        rm -f "$tmp"
+    elif command -v img2sixel >/dev/null 2>&1 && command -v magick >/dev/null 2>&1; then
+        tmp="$(mktemp --tmpdir="$CACHE_DIR" history-thumb.XXXXXX.png)"
+        magick "$image[0]" -auto-orient -resize '360x360>' "$tmp"
+        img2sixel "$tmp" || true
+        rm -f "$tmp"
+    else
+        printf 'image: %s\n' "$image"
+    fi
+}
+
+show_history_tags() {
+    local image="$1"
+    local tags_file="${image%.*}.tags"
+    local kind tags tag
+
+    fetch_tags_for_logo "$image" >/dev/null 2>&1 || true
+
+    if [[ ! -s "$tags_file" ]]; then
+        printf 'tags: -\n'
+        return 0
+    fi
+
+    for kind in artist copyright characters; do
+        tags="$(jq -r --arg kind "$kind" '.[$kind] // empty' "$tags_file")"
+        [[ -n "$tags" ]] || continue
+
+        printf '%s:' "$kind"
+        while IFS= read -r tag; do
+            printf ' %s' "$(tag_link "$tag")"
+        done < <(tr ' ' '\n' <<<"$tags")
+        printf '\n'
+    done
+}
+
+show_history() {
+    local limit="$1"
+    local image url index=1 found=0
+
+    if [[ "$limit" != "all" && ! "$limit" =~ ^[0-9]+$ ]]; then
+        printf 'Invalid history count: %s\n' "$limit" >&2
+        printf 'Use a number or all.\n' >&2
+        exit 2
+    fi
+
+    while IFS= read -r image; do
+        found=1
+        url="$(post_url_for_logo "$image")"
+
+        printf '\n\033[34m[%s]\033[0m %s\n' "$index" "$(basename "$image")"
+        show_history_image "$image"
+        show_history_tags "$image"
+        if [[ -n "$url" ]]; then
+            printf 'source: \033]8;;%s\033\\%s\033]8;;\033\\\n' "$url" "$url"
+        else
+            printf 'source: -\n'
+        fi
+        printf '%s\n' '────────────────────────────────────────'
+        index=$((index + 1))
+    done < <(history_images "$limit")
+
+    if [[ "$found" -eq 0 ]]; then
+        printf 'No waifufetch history found in %s.\n' "$CACHE_DIR" >&2
+        exit 1
+    fi
+}
+
+normalize_slide_delay() {
+    local delay="$1"
+
+    if [[ "$delay" =~ ^[0-9]+$ && "$delay" -ge "$MIN_SLIDE_DELAY" && "$delay" -le "$MAX_SLIDE_DELAY" ]]; then
+        printf '%s\n' "$delay"
+    else
+        printf 'Invalid slide delay: %s\n' "$delay" >&2
+        printf 'Use a number from %s to %s seconds.\n' "$MIN_SLIDE_DELAY" "$MAX_SLIDE_DELAY" >&2
+        exit 2
+    fi
+}
+
+slideshow_status() {
+    local image="$1"
+    local delay="$2"
+    local paused="$3"
+    local url state
+
+    url="$(post_url_for_logo "$image")"
+    if [[ "$paused" -eq 1 ]]; then
+        state="paused"
+    else
+        state="${delay}s"
+    fi
+
+    printf '\n[%s] space pause/resume | n next | +/- delay | o source | q quit\n' "$state"
+    if [[ -n "$url" ]]; then
+        printf 'source: \033]8;;%s\033\\%s\033]8;;\033\\\n' "$url" "$url"
+    fi
+}
+
+render_slideshow_image() {
+    local image="$1"
+    local delay="$2"
+    local paused="$3"
+    local cols lines image_lines
+
+    printf '\033[2J\033[H'
+
+    if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitten >/dev/null 2>&1; then
+        cols="$(tput cols 2>/dev/null || printf '80')"
+        lines="$(tput lines 2>/dev/null || printf '24')"
+        image_lines=$((lines - 3))
+        if [[ "$image_lines" -lt 1 ]]; then
+            image_lines=1
+        fi
+
+        kitten icat --clear --stdin=no >/dev/null 2>&1 || true
+        kitten icat \
+            --align=center \
+            --place "${cols}x${image_lines}@0x0" \
+            --scale-up=no \
+            --stdin=no \
+            --engine=builtin \
+            --transfer-mode=stream \
+            "$image" || printf 'image: %s\n' "$image"
+    elif command -v img2sixel >/dev/null 2>&1; then
+        img2sixel "$image" || printf 'image: %s\n' "$image"
+    else
+        printf 'image: %s\n' "$image"
+    fi
+
+    slideshow_status "$image" "$delay" "$paused"
+}
+
+slideshow_next_image() {
+    if ! promote_buffer_image >/dev/null 2>&1; then
+        if ! download_waifu "$NEXT_IMAGE" "$NEXT_URL"; then
+            return 1
+        fi
+        if ! promote_next_image; then
+            return 1
+        fi
+    fi
+
+    cleanup_cache
+    refresh_buffer_async
+}
+
+slideshow_cleanup() {
+    if [[ -n "${SLIDESHOW_STTY:-}" ]]; then
+        stty "$SLIDESHOW_STTY" 2>/dev/null || true
+    fi
+
+    if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitten >/dev/null 2>&1; then
+        kitten icat --clear --stdin=no >/dev/null 2>&1 || true
+    fi
+    printf '\033[?25h\033[0m\n'
+}
+
+run_slideshow() {
+    local delay="$1"
+    local paused=0
+    local remaining key logo
+
+    delay="$(normalize_slide_delay "$delay")"
+
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        printf 'Slideshow needs an interactive terminal.\n' >&2
+        exit 1
+    fi
+
+    SLIDESHOW_STTY="$(stty -g)"
+    trap slideshow_cleanup EXIT INT TERM
+    stty -echo -icanon time 0 min 0
+    printf '\033[?25l'
+
+    if [[ ! -s "$CURRENT_IMAGE" ]]; then
+        slideshow_next_image >/dev/null 2>&1 || true
+    fi
+    refresh_buffer_async
+
+    while true; do
+        logo="$(choose_logo)"
+        render_slideshow_image "$logo" "$delay" "$paused"
+        remaining="$delay"
+
+        while [[ "$paused" -eq 1 || "$remaining" -gt 0 ]]; do
+            if IFS= read -rsn1 -t 1 key; then
+                case "$key" in
+                    q|Q)
+                        exit 0
+                        ;;
+                    ' ')
+                        if [[ "$paused" -eq 1 ]]; then
+                            paused=0
+                            remaining="$delay"
+                        else
+                            paused=1
+                        fi
+                        render_slideshow_image "$logo" "$delay" "$paused"
+                        ;;
+                    n|N)
+                        paused=0
+                        break
+                        ;;
+                    +|=)
+                        if [[ "$delay" -lt "$MAX_SLIDE_DELAY" ]]; then
+                            delay=$((delay + 1))
+                        fi
+                        if [[ "$remaining" -gt "$delay" ]]; then
+                            remaining="$delay"
+                        fi
+                        render_slideshow_image "$logo" "$delay" "$paused"
+                        ;;
+                    -|_)
+                        if [[ "$delay" -gt "$MIN_SLIDE_DELAY" ]]; then
+                            delay=$((delay - 1))
+                        fi
+                        if [[ "$remaining" -gt "$delay" ]]; then
+                            remaining="$delay"
+                        fi
+                        render_slideshow_image "$logo" "$delay" "$paused"
+                        ;;
+                    o|O)
+                        if [[ -n "$(post_url_for_logo "$logo")" ]]; then
+                            open_source_url
+                        fi
+                        render_slideshow_image "$logo" "$delay" "$paused"
+                        ;;
+                esac
+            elif [[ "$paused" -eq 0 ]]; then
+                remaining=$((remaining - 1))
+            fi
+        done
+
+        if ! slideshow_next_image; then
+            sleep 2
+        fi
+    done
+}
+
+TAG_OVERRIDE=""
+RATING_OVERRIDE=""
+RATING_OVERRIDE_SET=0
+BUFFER_SIZE_OVERRIDE=""
+REFRESH_ONLY=0
+SHOW_SLIDESHOW=0
+SLIDE_DELAY="$DEFAULT_SLIDE_DELAY"
+PRINT_IMAGE=0
+PRINT_BUFFER_COUNT=0
+PRINT_IMAGE_TAGS=0
+PRINT_IMAGE_TAGS_FASTFETCH=0
+OPEN_SOURCE=0
+SHOW_HISTORY=0
+HISTORY_LIMIT=10
+TAGS_CHANGED=0
+BUFFER_SIZE_CHANGED=0
+FORCED_REFRESH=0
+FASTFETCH_ARGS=()
+BUFFER_SIZE="$(read_buffer_size)"
+FASTFETCH_WAIFU_BUFFER=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --refresh-only|--prefetch-buffer)
+            REFRESH_ONLY=1
+            shift
+            ;;
+        --slideshow)
+            SHOW_SLIDESHOW=1
+            shift
+            ;;
+        --slide-delay)
+            if [[ -z "${2:-}" ]]; then
+                printf '%s requires a value\n' "$1" >&2
+                exit 2
+            fi
+            SLIDE_DELAY="$2"
+            shift 2
+            ;;
+        --slide-delay=*)
+            SLIDE_DELAY="${1#*=}"
+            shift
+            ;;
+        --buffer-size)
+            if [[ -z "${2:-}" ]]; then
+                printf '%s requires a value\n' "$1" >&2
+                exit 2
+            fi
+            BUFFER_SIZE_OVERRIDE="$2"
+            BUFFER_SIZE_CHANGED=1
+            shift 2
+            ;;
+        --buffer-size=*)
+            BUFFER_SIZE_OVERRIDE="${1#*=}"
+            BUFFER_SIZE_CHANGED=1
+            shift
+            ;;
+        --print-image)
+            PRINT_IMAGE=1
+            shift
+            ;;
+        --buffer-count)
+            PRINT_BUFFER_COUNT=1
+            shift
+            ;;
+        --image-tags)
+            PRINT_IMAGE_TAGS=1
+            shift
+            ;;
+        --image-tags-fastfetch)
+            PRINT_IMAGE_TAGS_FASTFETCH=1
+            shift
+            ;;
+        --open-source)
+            OPEN_SOURCE=1
+            shift
+            ;;
+        --history)
+            SHOW_HISTORY=1
+            if [[ -n "${2:-}" && "$2" != -* ]]; then
+                HISTORY_LIMIT="$2"
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        --history=*)
+            SHOW_HISTORY=1
+            HISTORY_LIMIT="${1#*=}"
+            shift
+            ;;
+        -t|--tag|--tags)
+            if [[ -z "${2:-}" ]]; then
+                printf '%s requires a value\n' "$1" >&2
+                exit 2
+            fi
+            TAG_OVERRIDE="${TAG_OVERRIDE:+$TAG_OVERRIDE }$2"
+            TAGS_CHANGED=1
+            shift 2
+            ;;
+        --tag=*|--tags=*)
+            TAG_OVERRIDE="${TAG_OVERRIDE:+$TAG_OVERRIDE }${1#*=}"
+            TAGS_CHANGED=1
+            shift
+            ;;
+        -r|--rating)
+            if [[ "$#" -lt 2 ]]; then
+                printf '%s requires a value\n' "$1" >&2
+                exit 2
+            fi
+            RATING_OVERRIDE="$2"
+            RATING_OVERRIDE_SET=1
+            TAGS_CHANGED=1
+            shift 2
+            ;;
+        --rating=*)
+            RATING_OVERRIDE="${1#*=}"
+            RATING_OVERRIDE_SET=1
+            TAGS_CHANGED=1
+            shift
+            ;;
+        --)
+            shift
+            FASTFETCH_ARGS+=("$@")
+            break
+            ;;
+        *)
+            FASTFETCH_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [[ "$BUFFER_SIZE_CHANGED" -eq 1 ]]; then
+    save_buffer_size "$BUFFER_SIZE_OVERRIDE"
+    cleanup_cache
+    if [[ "$REFRESH_ONLY" -eq 0 && "$SHOW_SLIDESHOW" -eq 0 && "$TAGS_CHANGED" -eq 0 && "${#FASTFETCH_ARGS[@]}" -eq 0 ]]; then
+        printf 'Buffer size set to %s. History limit set to %s.\n' "$BUFFER_SIZE" "$BUFFER_SIZE"
+        exit 0
+    fi
+fi
+
+if [[ "$PRINT_IMAGE" -eq 1 ]]; then
+    printf '%s\n' "$(choose_logo)"
+    exit 0
+fi
+
+if [[ "$PRINT_BUFFER_COUNT" -eq 1 ]]; then
+    printf '%s/%s\n' "$(buffer_count)" "$BUFFER_SIZE"
+    exit 0
+fi
+
+if [[ "$PRINT_IMAGE_TAGS" -eq 1 ]]; then
+    tags_for_logo "$(choose_logo)"
+    exit 0
+fi
+
+if [[ "$PRINT_IMAGE_TAGS_FASTFETCH" -eq 1 ]]; then
+    tags_for_fastfetch
+    exit 0
+fi
+
+if [[ "$OPEN_SOURCE" -eq 1 ]]; then
+    open_source_url
+    exit 0
+fi
+
+if [[ "$SHOW_HISTORY" -eq 1 ]]; then
+    show_history "$HISTORY_LIMIT"
+    exit 0
+fi
+
+if [[ "$TAGS_CHANGED" -eq 0 ]] && tags_config_changed; then
+    clear_buffer
+    if [[ "$REFRESH_ONLY" -eq 0 ]]; then
+        download_waifu "$NEXT_IMAGE" "$NEXT_URL"
+        promote_next_image
+        mark_active_tags
+        FORCED_REFRESH=1
+    fi
+fi
+
+if [[ "$TAGS_CHANGED" -eq 1 ]]; then
+    save_tags
+    TAG_OVERRIDE=""
+    RATING_OVERRIDE=""
+    RATING_OVERRIDE_SET=0
+    clear_buffer
+    download_waifu "$NEXT_IMAGE" "$NEXT_URL"
+    promote_next_image
+    mark_active_tags
+    FORCED_REFRESH=1
+fi
+
+if [[ "$REFRESH_ONLY" -eq 1 ]]; then
+    fill_buffer
+    exit 0
+fi
+
+if [[ ! -s "$CURRENT_IMAGE" && "$FORCED_REFRESH" -eq 1 ]]; then
+    download_waifu "$NEXT_IMAGE" "$NEXT_URL" >/dev/null 2>&1 || true
+    promote_next_image >/dev/null 2>&1 || true
+fi
+
+if [[ "$FORCED_REFRESH" -eq 0 ]]; then
+    FASTFETCH_WAIFU_BUFFER="$(buffer_count)/$BUFFER_SIZE"
+    if [[ "$SHOW_SLIDESHOW" -eq 0 ]]; then
+        promote_buffer_image >/dev/null 2>&1 || true
+        cleanup_cache
+        refresh_buffer_async
+    fi
+fi
+
+if [[ "$SHOW_SLIDESHOW" -eq 1 ]]; then
+    run_slideshow "$SLIDE_DELAY"
+    exit 0
+fi
+
+logo="$(choose_logo)"
+post_url="$(post_url_for_logo "$logo")"
+export FASTFETCH_WAIFU_SOURCE="$post_url"
+export FASTFETCH_WAIFU_BUFFER="${FASTFETCH_WAIFU_BUFFER:-$(buffer_count)/$BUFFER_SIZE}"
+export FASTFETCH_WAIFU_TAGS="$(tags_for_logo "$logo")"
+fastfetch --logo "$logo" "${FASTFETCH_ARGS[@]}"
+status=$?
+
+if [[ "$FORCED_REFRESH" -eq 1 ]]; then
+    refresh_buffer_async
+fi
+exit "$status"

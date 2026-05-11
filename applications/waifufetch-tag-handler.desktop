@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Waifufetch Tag Handler
+Exec=waifufetch-tag-handler %u
+NoDisplay=true
+Terminal=false
+MimeType=x-scheme-handler/waifufetch-tag;
