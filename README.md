@@ -54,7 +54,7 @@ waifufetch --collage 12
 
 ## Slideshow
 
-`waifufetch --slideshow` shows only the image, as large as the terminal allows, and keeps rotating through the local buffer while refilling it in the background.
+`waifufetch --slideshow` shows the image as large as the terminal allows, keeps rotating through the local buffer while refilling it in the background, and reserves the top lines for artist, IP/copyright, characters, controls, and source.
 
 Controls:
 
