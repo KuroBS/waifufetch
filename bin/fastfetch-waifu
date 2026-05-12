@@ -542,6 +542,20 @@ tag_link() {
     printf '\033]8;;waifufetch-tag://set?tag=%s\033\\%s\033]8;;\033\\' "$encoded" "$tag"
 }
 
+tag_link_label() {
+    local tag="$1"
+    local label="$2"
+    local encoded
+
+    if [[ -z "$tag" || "$tag" == "-" ]]; then
+        printf '%s' "$label"
+        return 0
+    fi
+
+    encoded="$(jq -rn --arg tag "$tag" '$tag|@uri')"
+    printf '\033]8;;waifufetch-tag://set?tag=%s\033\\%s\033]8;;\033\\' "$encoded" "$label"
+}
+
 fastfetch_text_column() {
     local width left right
 
@@ -728,17 +742,38 @@ normalize_slide_delay() {
     fi
 }
 
-slideshow_compact_value() {
-    local value="$1"
+slideshow_tag_links() {
+    local tags="$1"
     local max="$2"
+    local used=0
+    local tag display output=""
 
-    value="$(sed 's/[[:space:]]\+/ /g; s/^[[:space:]]*//; s/[[:space:]]*$//' <<<"$value")"
-
-    if [[ "$max" -gt 3 && "${#value}" -gt "$max" ]]; then
-        printf '%s...\n' "${value:0:$((max - 3))}"
-    else
-        printf '%s\n' "$value"
+    tags="$(sed 's/[[:space:]]\+/ /g; s/^[[:space:]]*//; s/[[:space:]]*$//' <<<"$tags")"
+    if [[ -z "$tags" ]]; then
+        printf -- '-\n'
+        return 0
     fi
+
+    for tag in $tags; do
+        display="$tag"
+        if [[ "$used" -gt 0 ]]; then
+            if [[ "$((used + 1 + ${#display}))" -gt "$max" ]]; then
+                output="${output} ..."
+                break
+            fi
+            output="${output} "
+            used=$((used + 1))
+        elif [[ "${#display}" -gt "$max" ]]; then
+            display="${display:0:$((max - 3))}..."
+            output="$(tag_link_label "$tag" "$display")"
+            break
+        fi
+
+        output="${output}$(tag_link_label "$tag" "$display")"
+        used=$((used + ${#display}))
+    done
+
+    printf '%s\n' "$output"
 }
 
 slideshow_status() {
@@ -764,9 +799,9 @@ slideshow_status() {
     fi
 
     fetch_tags_for_logo "$image" >/dev/null 2>&1 || true
-    artist="$(slideshow_compact_value "$(jq -r '.artist // empty' "${image%.*}.tags" 2>/dev/null)" "$value_width")"
-    copyright="$(slideshow_compact_value "$(jq -r '.copyright // empty' "${image%.*}.tags" 2>/dev/null)" "$value_width")"
-    characters="$(slideshow_compact_value "$(jq -r '.characters // empty' "${image%.*}.tags" 2>/dev/null)" "$value_width")"
+    artist="$(slideshow_tag_links "$(jq -r '.artist // empty' "${image%.*}.tags" 2>/dev/null)" "$value_width")"
+    copyright="$(slideshow_tag_links "$(jq -r '.copyright // empty' "${image%.*}.tags" 2>/dev/null)" "$value_width")"
+    characters="$(slideshow_tag_links "$(jq -r '.characters // empty' "${image%.*}.tags" 2>/dev/null)" "$value_width")"
 
     printf '\033[1;1H\033[2K\033[34martist\033[0m: %s\n' "${artist:--}"
     printf '\033[2K\033[34mip\033[0m: %s\n' "${copyright:--}"
