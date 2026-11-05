@@ -78,6 +78,11 @@
             "type": "memory"
         },
         {
+            "key": "│ {#34}󰋼 cache    {#keys}│",
+            "type": "command",
+            "text": "cat \"$HOME/.cache/fastfetch/waifus/banner/cache.txt\""
+        },
+        {
             "key": "├────────────┤",
             "type": "custom"
         },

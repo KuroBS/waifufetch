@@ -69,4 +69,11 @@ if [[ -n "$source_url" ]]; then
     printf '\033]8;;%s\033\\source\033]8;;\033\\' "$source_url" > "$source_out"
 fi
 
+# ---- remaining cache (N/total) ----
+cache_out="$dir/cache.txt"
+bufn="$(find "$HOME/.cache/fastfetch/waifus/buffer" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)"
+bufn="${bufn:-0}"
+bufsz="$(sed -nE 's/^[[:space:]]*BUFFER_SIZE[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$HOME/.config/fastfetch/waifu-buffer-size.conf" 2>/dev/null | head -n 1)"
+printf '%s/%s\n' "$bufn" "${bufsz:-50}" > "$cache_out" 2>/dev/null || true
+
 exit 0

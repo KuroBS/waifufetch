@@ -73,15 +73,20 @@ if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( text_col + 37 > tc_now )); then
     fallback "$@"
 fi
 
-rm -f "$state" "$tags_file" "$source_file" "$blank"
-
 export FASTFETCH_WAIFU_SOURCE="$source"
 export FASTFETCH_WAIFU_TEXT_COLUMN="$text_col"
 
 banner="$cache/banner"
 mkdir -p "$banner" 2>/dev/null || true
+
+# Publish this banner's rows BEFORE deleting the entry files; fastfetch will
+# cat them and the blank logo from here. Also publish the remaining cache.
 cp -f "$tags_file" "$banner/tags.txt" 2>/dev/null || true
 cp -f "$source_file" "$banner/source.txt" 2>/dev/null || true
+bufn="$(find "$cache/buffer" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)"
+bufn="${bufn:-0}"
+bufsz="$(sed -nE 's/^[[:space:]]*BUFFER_SIZE[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$HOME/.config/fastfetch/waifu-buffer-size.conf" 2>/dev/null | head -n 1)"
+printf '%s/%s\n' "$bufn" "${bufsz:-50}" > "$banner/cache.txt" 2>/dev/null || true
 
 out="$(mktemp --tmpdir="$cache" paint.XXXXXX 2>/dev/null)" || fallback "$@"
 
@@ -91,7 +96,7 @@ rc=$?
 lines_out="$(wc -l < "$out" 2>/dev/null || printf '0')"
 [[ "$lines_out" =~ ^[0-9]+$ && "$lines_out" -gt 0 ]] || lines_out="$lines"
 cat "$out" 2>/dev/null
-rm -f "$out"
+rm -f "$out" "$state" "$tags_file" "$source_file" "$blank"
 
 printf '\033[%dA\033[1G' "$lines_out"
 if [[ "${pad_top:-0}" =~ ^[0-9]+$ ]] && (( pad_top > 0 )); then
