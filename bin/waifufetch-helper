@@ -32,25 +32,31 @@ trap 'rm -f "$pidfile"' EXIT
 # This must never compete with the terminal opening.
 renice -n 10 -p "$$" >/dev/null 2>&1 || true
 
+# How many images the buffer should hold (defaults to the user's BUFFER_SIZE).
+buffer_target="${WAIFUFETCH_BUFFER_TARGET:-50}"
+
 while :; do
     if [[ -x "$waifu" ]]; then
         ready="$(find "$queue" -maxdepth 1 -type f -name '*.state' 2>/dev/null | wc -l)"
         ready="${ready:-0}"
         bufsz="$(find "$cache_dir/buffer" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)"
         bufsz="${bufsz:-0}"
+
+        # 1) The cache comes first: keep it full so the queue never starves.
+        if (( bufsz < buffer_target )); then
+            WAIFUFETCH_FILL_LIMIT=4 "$waifu" --prefetch-buffer >/dev/null 2>&1 || true
+            sleep 1
+            continue
+        fi
+
+        # 2) Then keep ready banners parked for the painter.
         if (( ready < target )); then
-            if (( bufsz < 4 )); then
-                # Buffer too thin to feed the queue: refill a few images first
-                # so every queue entry does not wait for its own download.
-                WAIFUFETCH_FILL_LIMIT=3 "$waifu" --prefetch-buffer >/dev/null 2>&1 || true
-                sleep 1
-                continue
-            fi
             WAIFUFETCH_LOGO_MODE=graphics "$waifu" --prepare-next >/dev/null 2>&1 || true
             sleep 1
             continue
         fi
-        # Keep the ANSI fallback (alacritty and friends) fresh too.
+
+        # 3) Idle: refresh the ANSI fallback and top the buffer back up.
         "$waifu" --ensure-logo >/dev/null 2>&1 || true
         WAIFUFETCH_FILL_LIMIT=1 "$waifu" --prefetch-buffer >/dev/null 2>&1 || true
     fi

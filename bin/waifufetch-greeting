@@ -1,12 +1,29 @@
 #!/usr/bin/env bash
 
 # Greeting wrapper: the ONLY thing an opening terminal runs is the fast
-# painter. The helper (buffer + ready banners) is started once per session
-# from the compositor autostart, never from here.
+# painter. If the background helper (buffer + ready banners) is not running,
+# it is started detached - a flock probe keeps that check to a few ms.
 
 set -uo pipefail
 
 paint="$HOME/.local/bin/waifufetch-paint"
+helper="$HOME/.local/bin/waifufetch-helper"
+lock="$HOME/.cache/fastfetch/waifus/helper.lock"
+
+if [[ -x "$helper" ]] && [[ -e "$lock" ]]; then
+    if flock -n "$lock" -c true 2>/dev/null; then
+        # Lock was free: no helper is alive, start one detached.
+        (
+            if command -v setsid >/dev/null 2>&1; then
+                setsid "$helper" >/dev/null 2>&1 </dev/null &
+            else
+                nohup "$helper" >/dev/null 2>&1 </dev/null &
+            fi
+        ) 2>/dev/null &
+    fi
+elif [[ -x "$helper" ]]; then
+    ( setsid "$helper" >/dev/null 2>&1 </dev/null & ) 2>/dev/null &
+fi
 
 if [[ -x "$paint" ]]; then
     exec "$paint" "$@"
