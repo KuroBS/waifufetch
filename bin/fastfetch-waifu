@@ -860,13 +860,21 @@ ensure_logo_image() {
         read -r cols lines <<<"$(logo_geometry)"
         wanted="${target}|${cols}x${lines}"
 
-        if [[ ! -s "$LOGO_ANSI" || "$(cat "$LOGO_META" 2>/dev/null || true)" != "$wanted" ]]; then
-            if render_ansi_logo "$target" "$LOGO_ANSI" "$cols" "$lines"; then
+        # A render can come out empty (bad decode, terminal with no size...).
+        # Never trust one: require real content, otherwise redo it.
+        ansi_positive() {
+            [[ -s "$LOGO_ANSI" ]] &&
+                [[ "$(wc -l < "$LOGO_ANSI" 2>/dev/null || printf '0')" -ge 3 ]] &&
+                grep -q '38;2;' "$LOGO_ANSI" 2>/dev/null
+        }
+
+        if ! ansi_positive || [[ "$(cat "$LOGO_META" 2>/dev/null || true)" != "$wanted" ]]; then
+            if render_ansi_logo "$target" "$LOGO_ANSI" "$cols" "$lines" && ansi_positive; then
                 printf '%s\n' "$wanted" > "$LOGO_META" 2>/dev/null || true
             fi
         fi
 
-        [[ -s "$LOGO_ANSI" ]]
+        ansi_positive
         return
     fi
 
