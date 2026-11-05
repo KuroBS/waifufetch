@@ -18,6 +18,7 @@ ACTIVE_TAGS_FILE="$CACHE_DIR/active-tags.conf"
 LOGO_IMAGE="$CACHE_DIR/logo.png"
 LOGO_ANSI="$CACHE_DIR/logo.ansi"
 LOGO_META="$CACHE_DIR/logo.meta"
+KCACHE_DIR="$CACHE_DIR/kcache"
 FALLBACK_IMAGE="$HOME/.config/ml4w/assets/ml4w.png"
 API_URL="https://danbooru.donmai.us/posts.json"
 GELBOORU_API_URL="https://gelbooru.com/index.php"
@@ -430,7 +431,7 @@ render_ansi_logo() {
         -filter Lanczos -resize "${cols}x$((max_lines * 2))" \
         -unsharp 0x0.6+0.4+0.01 -depth 8 txt:- 2>/dev/null \
         | sed -nE 's/^([0-9]+),([0-9]+): \(([0-9]+),([0-9]+),([0-9]+).*/\1 \2 \3 \4 \5/p' \
-        | awk -v block="▀" '
+        | awk -v block="▀" -v widthfile="$out.width" '
             BEGIN { esc = sprintf("%c", 27) }
             NF == 5 {
                 key = $2 "," $1
@@ -452,6 +453,10 @@ render_ansi_logo() {
                     }
                     printf "%s%s[0m\n", buf, esc
                 }
+                if (widthfile != "") {
+                    printf "%d\n", maxx + 1 > widthfile
+                    close(widthfile)
+                }
             }' > "$out"
 
     [[ -s "$out" ]]
@@ -467,6 +472,53 @@ logo_columns() {
     else
         printf '33\n'
     fi
+}
+
+# Longest tag in a tags listing ("artist: a b"), in characters.
+tag_max_len() {
+    local tags="$1" line value token max=0
+
+    while IFS= read -r line; do
+        value="${line#*: }"
+        for token in $value; do
+            if (( ${#token} > max )); then
+                max=${#token}
+            fi
+        done
+    done <<<"$tags"
+
+    printf '%s\n' "$max"
+}
+
+# Columns fastfetch puts in front of the module box for a logo $1 cells wide.
+# Measured: the logo area is max(content, config width - 1) plus the paddings,
+# so a narrow picture does not pull the box to the left.
+text_column_for_width() {
+    local logo_w="$1" width left top right
+
+    width="$(logo_columns)"
+    read -r left _ right < <(logo_padding)
+    (( logo_w < width - 1 )) && logo_w=$((width - 1))
+
+    printf '%s\n' "$((logo_w + left + right))"
+}
+
+# Widest the logo may get so the module box (prefix + longest tag) still fits
+# on one line. Without this a long tag name wraps onto the next row.
+tag_width_cap() {
+    local tags="$1" tcols pad_left pad_top pad_right cap
+
+    read -r tcols _ < <(terminal_cells 2>/dev/null || printf '100 30\n')
+    [[ "$tcols" =~ ^[0-9]+$ ]] || tcols=100
+    read -r pad_left _ pad_right < <(logo_padding)
+
+    # Leave ~60 columns for the box: 16 for the "| <icon> label| " prefix plus
+    # the longest built-in value (the cpu line is the widest, ~43 chars).
+    # Tag labels are truncated to whatever is left over.
+    cap=$((tcols - pad_left - pad_right - 60))
+    (( cap < 20 )) && cap=20
+
+    printf '%s\n' "$cap"
 }
 
 # Largest logo that fits next to the module box in the current terminal.
@@ -486,6 +538,9 @@ logo_geometry() {
     (( avail_cols < cfg_cols )) && avail_cols="$cfg_cols"
     (( avail_cols < 20 )) && avail_cols=20
     (( avail_cols > 120 )) && avail_cols=120
+    if [[ "${LOGO_MAX_COLS:-}" =~ ^[0-9]+$ ]] && (( avail_cols > LOGO_MAX_COLS )); then
+        avail_cols="$LOGO_MAX_COLS"
+    fi
     (( avail_lines < 8 )) && avail_lines=8
     (( avail_lines > 60 )) && avail_lines=60
 
@@ -516,10 +571,22 @@ logo_mode() {
 
 # Pixel size of one character cell, "<w> <h>".
 cell_pixels() {
-    local size w h tcols tlines cw ch
+    local size w h tcols tlines cw ch cache_file
+
+    read -r tcols tlines < <(terminal_cells 2>/dev/null || printf '100 30\n')
+
+    # kitten is a python process (~140ms); the cell size only changes when the
+    # window or font size does, so cache it per terminal size.
+    cache_file="$CACHE_DIR/cell-size.${tcols}x${tlines}"
+    if [[ -s "$cache_file" ]]; then
+        read -r cw ch < "$cache_file"
+        if [[ "$cw" =~ ^[0-9]+$ && "$ch" =~ ^[0-9]+$ && "$cw" -gt 0 && "$ch" -gt 0 ]]; then
+            printf '%s %s\n' "$cw" "$ch"
+            return 0
+        fi
+    fi
 
     size="$(kitten icat --print-window-size --stdin=no 2>/dev/null | tr -d '\r' | head -n 1)"
-    read -r tcols tlines < <(terminal_cells 2>/dev/null || printf '100 30\n')
 
     if [[ "$size" =~ ^([0-9]+)x([0-9]+)$ ]]; then
         w="${BASH_REMATCH[1]}"
@@ -533,17 +600,20 @@ cell_pixels() {
     [[ "$cw" =~ ^[0-9]+$ && "$cw" -gt 0 ]] || cw=8
     [[ "$ch" =~ ^[0-9]+$ && "$ch" -gt 0 ]] || ch=17
 
+    mkdir -p "$CACHE_DIR" 2>/dev/null || true
+    printf '%s %s\n' "$cw" "$ch" > "$cache_file" 2>/dev/null || true
     printf '%s %s\n' "$cw" "$ch"
 }
 
 # Left/top logo padding from config.jsonc, "<left> <top>".
 logo_padding() {
-    local left top
+    local left top right
 
     left="$(sed -nE 's/^[[:space:]]*"left"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" 2>/dev/null | head -n 1)"
     top="$(sed -nE 's/^[[:space:]]*"top"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" 2>/dev/null | head -n 1)"
+    right="$(sed -nE 's/^[[:space:]]*"right"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" 2>/dev/null | head -n 1)"
 
-    printf '%s %s\n' "${left:-0}" "${top:-0}"
+    printf '%s %s %s\n' "${left:-0}" "${top:-0}" "${right:-0}"
 }
 
 # Cell rectangle "<cols> <lines>" that keeps the image aspect inside the area
@@ -552,7 +622,7 @@ graphics_geometry() {
     local image="$1" maxc maxl iw ih cw ch x y pad_left pad_top
 
     read -r maxc maxl < <(logo_geometry)
-    read -r pad_left pad_top < <(logo_padding)
+    read -r pad_left pad_top _ < <(logo_padding)
     maxl=$((maxl - pad_top))
     ((maxl < 4)) && maxl=4
     read -r iw ih < <(magick identify -format '%w %h\n' "$image[0]" 2>/dev/null | head -n 1)
@@ -582,11 +652,29 @@ graphics_geometry() {
 # instead, which races with fastfetch's stdout.
 kitty_image_escape() {
     local image="$1" cols="$2" lines="$3"
+    local img cw ch pw ph tmp rc
 
     [[ -s "$image" ]] || return 1
     command -v python3 >/dev/null 2>&1 || return 1
 
-    python3 - "$image" "$cols" "$lines" <<'PYEOF'
+    # Sending a 750 KB PNG for a 40x28 cell area wastes transfer and decode
+    # time. Downscale to exactly what the terminal can show.
+    img="$image"
+    read -r cw ch < <(cell_pixels)
+    if command -v magick >/dev/null 2>&1; then
+        pw=$((cols * cw))
+        ph=$((lines * ch))
+        if (( pw > 0 && ph > 0 )); then
+            tmp="$(temp_png kimg)"
+            if magick "$image[0]" -auto-orient -resize "${pw}x${ph}" -depth 8 "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+                img="$tmp"
+            else
+                rm -f "$tmp"
+            fi
+        fi
+    fi
+
+    python3 - "$img" "$cols" "$lines" <<'PYEOF'
 import base64, sys
 img, c, r = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 data = base64.b64encode(open(img, "rb").read()).decode()
@@ -601,15 +689,69 @@ for i in range(0, len(data), CH):
         sys.stdout.write(f"{esc}_Gm={more};{chunk}{esc}\\")
 sys.stdout.flush()
 PYEOF
+    rc=$?
+    [[ "$img" == "$image" ]] || rm -f "$img"
+    return $rc
+}
+
+# Cache file for the escape of one image at one geometry.
+escape_cache_file() {
+    local image="$1" cols="$2" lines="$3"
+
+    printf '%s/%s.%sx%s.esc\n' "$KCACHE_DIR" "$(basename "$image")" "$cols" "$lines"
+}
+
+# Emit the kitty escape, reusing the cached one when possible. A cached escape
+# is just a cat, which is what makes opening a terminal feel instant.
+kitty_image_escape_cached() {
+    local image="$1" cols="$2" lines="$3"
+    local cache tmp
+
+    [[ -s "$image" ]] || return 1
+    cache="$(escape_cache_file "$image" "$cols" "$lines")"
+
+    if [[ -s "$cache" ]]; then
+        cat "$cache"
+        return 0
+    fi
+
+    mkdir -p "$KCACHE_DIR" 2>/dev/null || true
+    tmp="$cache.tmp.$$"
+    if kitty_image_escape "$image" "$cols" "$lines" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+        mv -f "$tmp" "$cache" 2>/dev/null || true
+        cat "$cache"
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+oldest_buffer_image() {
+    find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' -printf '%T@ %p\n' 2>/dev/null \
+        | sort -n | head -n 1 | cut -d' ' -f2-
+}
+
+# Prepare the escape for the image the next terminal will show, so that the
+# next startup only has to cat a file. Runs in the background.
+prefetch_escape_async() {
+    (
+        local img cols lines
+        img="$(oldest_buffer_image)"
+        if [[ -n "$img" && -s "$img" ]]; then
+            read -r cols lines < <(graphics_geometry "$img")
+            kitty_image_escape_cached "$img" "$cols" "$lines" >/dev/null 2>&1 || true
+        fi
+        ls -1t "$KCACHE_DIR"/*.esc 2>/dev/null | tail -n +41 | xargs -r rm -f 2>/dev/null || true
+    ) >/dev/null 2>&1 &
 }
 
 # Fastfetch layout with a blank logo area, then the real image drawn on top
 # with kitty's image protocol (full resolution, no block approximation).
 graphics_banner() {
     local image="$1"
-    local cols lines blank args lines_out rc pad_left pad_top
+    local cols lines blank args lines_out rc pad_left pad_top pad_right out_file maxc hoffset
 
-    read -r pad_left pad_top < <(logo_padding)
+    read -r pad_left pad_top pad_right < <(logo_padding)
     read -r cols lines < <(graphics_geometry "$image")
     blank="$CACHE_DIR/logo-blank.txt"
     mkdir -p "$CACHE_DIR" 2>/dev/null || true
@@ -617,14 +759,22 @@ graphics_banner() {
 
     args=(--logo "$blank" --logo-type file-raw)
 
-    # Same args, piped: gives the exact line count fastfetch prints so the
-    # cursor can be moved back to the top-left of the logo area afterwards.
-    lines_out="$(fastfetch "${args[@]}" "${FASTFETCH_ARGS[@]}" 2>/dev/null | wc -l)"
-    [[ "$lines_out" =~ ^[0-9]+$ ]] || lines_out="$lines"
+    # The tag rows are printed by a child process that indents continuation
+    # lines with a cursor-forward escape; it needs the real logo width or the
+    # copyright/character lines end up inside the picture area.
+    export FASTFETCH_WAIFU_TEXT_COLUMN="$(text_column_for_width "$cols")"
 
+    # Single fastfetch pass: capture it to a temp file to learn the exact line
+    # count for the cursor maths, then print it. Running fastfetch a second
+    # time just to count lines doubled the cost of opening a terminal.
+    out_file="$(temp_png banner)"
     printf '\033[2J\033[H'
-    fastfetch "${args[@]}" "${FASTFETCH_ARGS[@]}"
+    fastfetch "${args[@]}" "${FASTFETCH_ARGS[@]}" > "$out_file" 2>/dev/null
     rc=$?
+    lines_out="$(wc -l < "$out_file" 2>/dev/null || printf '0')"
+    [[ "$lines_out" =~ ^[0-9]+$ && "$lines_out" -gt 0 ]] || lines_out="$lines"
+    cat "$out_file" 2>/dev/null || true
+    rm -f "$out_file"
 
     # Top-left of the logo area (row 1 + padding).
     printf '\033[%dA\033[1G' "$lines_out"
@@ -632,13 +782,12 @@ graphics_banner() {
 
     # Centre the picture in the free space: a portrait image is narrower than
     # the area, and without this it would hug the left edge with a big gap.
-    local maxc hoffset
     read -r maxc _ < <(logo_geometry)
     hoffset=$(( pad_left + (maxc - cols) / 2 ))
     (( hoffset < pad_left )) && hoffset="$pad_left"
     if (( hoffset )); then printf '\033[%dC' "$hoffset"; fi
 
-    if ! kitty_image_escape "$image" "$cols" "$lines"; then
+    if ! kitty_image_escape_cached "$image" "$cols" "$lines"; then
         printf '\033[%d;1H' "$((lines_out + 1))"
         return 1
     fi
@@ -1044,6 +1193,7 @@ tags_for_logo() {
 
 tag_link() {
     local tag="$1"
+    local label="${2:-$1}"
     local encoded
 
     if [[ -z "$tag" || "$tag" == "-" ]]; then
@@ -1052,7 +1202,7 @@ tag_link() {
     fi
 
     encoded="$(jq -rn --arg tag "$tag" '$tag|@uri')"
-    printf '\033]8;;waifufetch-tag://set?tag=%s\033\\%s\033]8;;\033\\' "$encoded" "$tag"
+    printf '\033]8;;waifufetch-tag://set?tag=%s\033\\%s\033]8;;\033\\' "$encoded" "$label"
 }
 
 tag_link_label() {
@@ -1072,6 +1222,11 @@ tag_link_label() {
 fastfetch_text_column() {
     local width left right
 
+    if [[ "${FASTFETCH_WAIFU_TEXT_COLUMN:-}" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$FASTFETCH_WAIFU_TEXT_COLUMN"
+        return 0
+    fi
+
     width="$(sed -nE 's/^[[:space:]]*"width"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" | head -n 1)"
     left="$(sed -nE 's/^[[:space:]]*"left"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" | head -n 1)"
     right="$(sed -nE 's/^[[:space:]]*"right"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" | head -n 1)"
@@ -1084,14 +1239,25 @@ fastfetch_text_column() {
 }
 
 tags_for_fastfetch() {
-    local line kind value linked_value text_column first=1
+    local line kind value label linked_value text_column first=1 tcols avail
 
     text_column="$(fastfetch_text_column)"
+    read -r tcols _ < <(terminal_cells 2>/dev/null || printf '100 30\n')
+    [[ "$tcols" =~ ^[0-9]+$ ]] || tcols=100
+    # 17 = "| <icon> character| " plus a small right margin.
+    avail=$((tcols - text_column - 17))
+    (( avail < 12 )) && avail=12
 
     while IFS= read -r line; do
         kind="${line%%:*}"
         value="${line#*: }"
-        linked_value="$(tag_link "$value")"
+        # Only the label is shortened; the link keeps the whole tag.
+        if (( ${#value} > avail )); then
+            label="${value:0:$((avail - 1))}…"
+        else
+            label="$value"
+        fi
+        linked_value="$(tag_link "$value" "$label")"
 
         case "$kind" in
             artist)
@@ -2056,13 +2222,19 @@ if [[ "$SHOW_SLIDESHOW" -eq 1 ]]; then
 fi
 
 source_image="$(choose_logo)"
+LOGO_MODE_ACTIVE="$(logo_mode)"
 
-if [[ "$(logo_mode)" == "graphics" && -s "$source_image" && -t 1 ]]; then
-    post_url="$(post_url_for_logo "$source_image")"
-    export FASTFETCH_WAIFU_SOURCE="$post_url"
-    export FASTFETCH_WAIFU_BUFFER="${FASTFETCH_WAIFU_BUFFER:-$(buffer_count)/$BUFFER_SIZE}"
-    export FASTFETCH_WAIFU_TAGS="$(tags_for_logo "$source_image")"
+# The tag rows are the widest module lines, so the logo width has to leave
+# room for them; compute that before any geometry is decided.
+tag_text="$(tags_for_logo "$source_image")"
+export FASTFETCH_WAIFU_SOURCE="$(post_url_for_logo "$source_image")"
+export FASTFETCH_WAIFU_BUFFER="${FASTFETCH_WAIFU_BUFFER:-$(buffer_count)/$BUFFER_SIZE}"
+export FASTFETCH_WAIFU_TAGS="$tag_text"
+LOGO_MAX_COLS="$(tag_width_cap "$tag_text")"
+
+if [[ "$LOGO_MODE_ACTIVE" == "graphics" && -s "$source_image" && -t 1 ]]; then
     if graphics_banner "$source_image"; then
+        prefetch_escape_async
         exit 0
     fi
     # fall through to the ANSI renderer if kitty could not draw the image
@@ -2070,7 +2242,7 @@ fi
 
 ensure_logo_image || true
 
-if [[ "$(logo_mode)" == "ansi" && -s "$LOGO_ANSI" ]]; then
+if [[ "$LOGO_MODE_ACTIVE" == "ansi" && -s "$LOGO_ANSI" ]]; then
     logo="$LOGO_ANSI"
     LOGO_ARGS=(--logo "$LOGO_ANSI" --logo-type file-raw)
 elif [[ -s "$source_image" && -r "$source_image" ]]; then
@@ -2081,10 +2253,12 @@ else
     LOGO_ARGS=(--logo none)
 fi
 
-post_url="$(post_url_for_logo "$source_image")"
-export FASTFETCH_WAIFU_SOURCE="$post_url"
-export FASTFETCH_WAIFU_BUFFER="${FASTFETCH_WAIFU_BUFFER:-$(buffer_count)/$BUFFER_SIZE}"
-export FASTFETCH_WAIFU_TAGS="$(tags_for_logo "$source_image")"
+if [[ "$LOGO_MODE_ACTIVE" != "graphics" ]] && [[ -s "$LOGO_ANSI" ]]; then
+    read -r pad_left _ pad_right < <(logo_padding)
+    logo_w="$(cat "$LOGO_ANSI.width" 2>/dev/null || true)"
+    [[ "$logo_w" =~ ^[0-9]+$ ]] || logo_w="$(logo_columns)"
+    export FASTFETCH_WAIFU_TEXT_COLUMN="$(text_column_for_width "$logo_w")"
+fi
 fastfetch "${LOGO_ARGS[@]}" "${FASTFETCH_ARGS[@]}"
 status=$?
 

@@ -143,6 +143,25 @@ drawn next to the module box at the native resolution the terminal can show
 (~500x500 px on a 100x30 window, about 30x more pixels than the block art).
 alacritty has no image protocol at all, so there the blocks are the ceiling.
 
+### Startup cost
+
+Opening a terminal should feel instant, so the heavy work is cached or moved
+off the critical path:
+
+- **one fastfetch pass**: it is captured to a temp file (to learn the exact
+  line count for the cursor maths) and then printed, instead of running
+  fastfetch twice;
+- **cached cell size**: `kitten icat --print-window-size` spawns python
+  (~140 ms), so the result is cached per terminal size;
+- **cached escapes**: the ready-to-print kitty escape is stored in
+  `~/.cache/fastfetch/waifus/kcache/<image>.<cols>x<lines>.esc`, so showing an
+  already-prepared image is just a `cat`;
+- **background prefetch**: after drawing, the escape for the *next* buffered
+  image is prepared in the background, so the next terminal opens instantly;
+- **background refill**: promoting an image leaves a hole in the buffer, which
+  is refilled by a detached download while you keep using the shell (this is
+  the original repo behaviour: a cache of unshown images).
+
 The kitty escape is emitted by the script itself (chunked
 `<ESC>_Ga=T,f=100,t=d,c=..,r=..,q=2,C=1,m=..;<base64>` on stdout, `python3` for
 the base64). It deliberately does not use `kitten icat`: that writes to
