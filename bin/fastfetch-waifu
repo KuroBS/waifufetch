@@ -75,6 +75,7 @@ Waifu options:
   --ensure-logo        Genera el logo (ANSI) desde la imagen actual y sale
   --prepare-escapes    Pre-genera los escapes de las siguientes imagenes
   --prepare-next       Prepara un banner completo para el pintor rapido
+  --maintain-cache     Recorta las copias mas antiguas de la cache
   --helper-start       Arranca el helper de fondo (buffer + escapes)
   --helper-stop        Para el helper de fondo
   --helper-status      Dice si el helper esta corriendo
@@ -757,6 +758,38 @@ kitty_image_escape_cached() {
 
 # Keep the buffer at its configured size, dropping the newest surplus so the
 # rotation order (oldest first) is preserved.
+# Sliding-window cleanup: every time an image is shown or downloaded, the
+# oldest copies of each kind are evicted so the cache never grows unbounded.
+maintain_cache() {
+    local current_target old
+
+    # Shown-image history: keep the newest 20 (the filename carries the
+    # promotion time, so sorting by name is promotion order). Never remove
+    # the image the current logo points at.
+    current_target="$(readlink -f "$CURRENT_IMAGE" 2>/dev/null || true)"
+    find "$CACHE_DIR" -maxdepth 1 -type f -name 'current-*.png' 2>/dev/null \
+        | sort -r \
+        | awk -v keep="${WAIFUFETCH_HISTORY_KEEP:-20}" 'NR > keep {print}' \
+        | while IFS= read -r old; do
+            if [[ -n "$current_target" && "$old" == "$current_target" ]]; then
+                continue
+            fi
+            rm -f "$old" "${old%.*}.url" "${old%.*}.tags" "${old%.*}.dim"
+        done
+
+    # Pre-rendered kitty escapes: keep the newest 40.
+    ls -1t "$KCACHE_DIR"/*.esc 2>/dev/null | tail -n +41 | xargs -r rm -f 2>/dev/null || true
+
+    # Buffer: cap at BUFFER_SIZE (drop the newest surplus so the
+    # oldest-first rotation order is preserved).
+    prune_buffer
+
+    # Queue leftovers: entry files whose .state was consumed or failed.
+    find "$PAINT_QUEUE" -maxdepth 1 -type f ! -name '*.state' -mmin +60 -delete 2>/dev/null || true
+
+    return 0
+}
+
 prune_buffer() {
     local count
 
@@ -945,6 +978,7 @@ prepare_next_banner() {
         > "$entry.state.tmp" 2>/dev/null || return 1
     mv -f "$entry.state.tmp" "$entry.state" 2>/dev/null || return 1
 
+    maintain_cache
     return 0
 }
 
@@ -2205,6 +2239,7 @@ DOCTOR=0
 ENSURE_LOGO=0
 PREPARE_ESCAPES=0
 PREPARE_NEXT=0
+MAINTAIN_CACHE=0
 HELPER_ACTION=""
 SHOW_HISTORY=0
 HISTORY_LIMIT=10
@@ -2291,6 +2326,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --ensure-logo)
             ENSURE_LOGO=1
+            shift
+            ;;
+        --maintain-cache)
+            MAINTAIN_CACHE=1
             shift
             ;;
         --prepare-next)
@@ -2422,6 +2461,11 @@ fi
 
 if [[ "$HELPER_ACTION" == "status" ]]; then
     if helper_running; then printf 'helper: corriendo\n'; else printf 'helper: parado\n'; fi
+    exit 0
+fi
+
+if [[ "$MAINTAIN_CACHE" -eq 1 ]]; then
+    maintain_cache
     exit 0
 fi
 

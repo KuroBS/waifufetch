@@ -56,9 +56,11 @@ while :; do
             continue
         fi
 
-        # 3) Idle: refresh the ANSI fallback and top the buffer back up.
+        # 3) Idle: refresh the ANSI fallback, top the buffer up and trim
+        # the oldest cached copies (history, escapes, queue leftovers).
         "$waifu" --ensure-logo >/dev/null 2>&1 || true
         WAIFUFETCH_FILL_LIMIT=1 "$waifu" --prefetch-buffer >/dev/null 2>&1 || true
+        WAIFUFETCH_LOGO_MODE=graphics "$waifu" --maintain-cache >/dev/null 2>&1 || true
     fi
     sleep 8
 done
