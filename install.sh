@@ -34,7 +34,7 @@ else
 fi
 
 if [[ ! -f "$HOME/.config/fastfetch/waifu-tags.conf" ]]; then
-    printf '%s\n' '1girl rating:general' > "$HOME/.config/fastfetch/waifu-tags.conf"
+    printf '%s\n' '1girl' > "$HOME/.config/fastfetch/waifu-tags.conf"
 fi
 
 if [[ ! -f "$HOME/.config/fastfetch/waifufetch-source.conf" ]]; then

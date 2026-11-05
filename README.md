@@ -219,7 +219,8 @@ BOORU_SITE=danbooru
 Example (Gelbooru):
 
 ```text
-1girl rating:general
+1girl rating:general   # con filtro de rating
+1girl                  # sin rating: busca TODOS los ratings
 ```
 
 Example (Danbooru):

@@ -60,6 +60,7 @@ Waifu options:
                        Se puede repetir: --tag 1girl --tag cat_ears
   -r, --rating RATING  Cambia el rating y lo guarda: g, s, q, e o rating:g
                        (en Gelbooru se traduce a general/sensitive/questionable/explicit)
+                       Sin rating: se buscan TODOS los ratings.
                        Usa --rating "" para borrar el rating guardado
   --buffer-size SIZE   Cambia el tamano del buffer y del historial
   --prefetch-buffer    Precarga el buffer hasta el tamano configurado y no muestra fastfetch
@@ -286,7 +287,7 @@ read_tags() {
     if [[ -f "$TAGS_FILE" ]]; then
         sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' "$TAGS_FILE" | tr '\n' ' ' | sed 's/[[:space:]]*$//'
     else
-        printf '%s\n' "1girl rating:g"
+        printf '%s\n' "1girl"
     fi
 }
 
@@ -364,21 +365,17 @@ build_tags() {
 
     config_tags="$(read_tags)"
 
+    # A rating is only applied when the user sets one (--rating or a rating
+    # tag). No selection -> all ratings are searched, so an explicit-only
+    # tag does not error out against an injected default.
     if [[ -n "${TAG_OVERRIDE:-}" ]]; then
         tags="$TAG_OVERRIDE"
-        config_rating="$(last_rating_tag "$config_tags")"
-        if [[ -z "$config_rating" ]]; then
-            config_rating="rating:g"
-        fi
-        if [[ "$tags" != *rating:* && -n "$config_rating" ]]; then
-            tags="$tags $config_rating"
-        fi
     else
         tags="$config_tags"
     fi
 
     if [[ -z "$tags" ]]; then
-        tags="1girl rating:g"
+        tags="1girl"
     fi
 
     if [[ "${RATING_OVERRIDE_SET:-0}" -eq 1 ]]; then
