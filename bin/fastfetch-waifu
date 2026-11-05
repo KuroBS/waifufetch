@@ -780,6 +780,11 @@ maintain_cache() {
     # Pre-rendered kitty escapes: keep the newest 40.
     ls -1t "$KCACHE_DIR"/*.esc 2>/dev/null | tail -n +41 | xargs -r rm -f 2>/dev/null || true
 
+    # Buffer: drop PNGs whose download was interrupted (no .url sidecar).
+    while IFS= read -r p; do
+        [[ -s "${p%.*}.url" ]] || rm -f "$p"
+    done < <(find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' 2>/dev/null || true)
+
     # Buffer: cap at BUFFER_SIZE (drop the newest surplus so the
     # oldest-first rotation order is preserved).
     prune_buffer
@@ -1287,6 +1292,12 @@ fill_buffer() {
         exec {lock_fd}>&-
         return 0
     fi
+
+    # Interrupted downloads leave PNGs without their .url sidecar; they look
+    # like cache to a naive count and stall the refill forever. Drop them.
+    while IFS= read -r p; do
+        [[ -s "${p%.*}.url" ]] || rm -f "$p"
+    done < <(find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' 2>/dev/null || true)
     count="$(buffer_count)"
     count="${count:-0}"
 
@@ -1294,7 +1305,8 @@ fill_buffer() {
     # buffer empty for the next terminal. Retry a few times instead, and
     # recount every round so two concurrent fills cannot overshoot the size.
     while [[ "$failures" -lt 3 && "$attempts" -lt $((BUFFER_SIZE * 3)) ]]; do
-        count="$(find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)"
+        # .url files == valid pairs (each image gets one).
+        count="$(find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.url' 2>/dev/null | wc -l)"
         count="${count:-0}"
         [[ "$count" -lt "$BUFFER_SIZE" ]] || break
         attempts=$((attempts + 1))
