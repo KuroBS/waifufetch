@@ -56,7 +56,7 @@ Usage:
   fastfetch-waifu --image-tags-fastfetch
 
 Waifu options:
-  -t, --tag TAGS       Cambia los tags de Danbooru y los guarda
+  -t, --tag TAGS       Cambia los tags del booru (gelbooru) y los guarda
                        Se puede repetir: --tag 1girl --tag cat_ears
   -r, --rating RATING  Cambia el rating y lo guarda: g, s, q, e o rating:g
                        (en Gelbooru se traduce a general/sensitive/questionable/explicit)
@@ -106,7 +106,7 @@ Después descarga una imagen nueva y muestra fastfetch con esa imagen.
 Tags:
   Edit ~/.config/fastfetch/waifu-tags.conf
   Default is SFW: 1girl rating:g
-  Anonymous Danbooru searches are limited, so keep this to 2 tags unless you add auth.
+  Anonymous DANBOORU searches are limited to 2 tags; Gelbooru with an API key accepts many.
 
 Auth:
   Create ~/.config/fastfetch/danbooru-auth.conf with:
@@ -419,7 +419,7 @@ mark_active_tags() {
 }
 
 warn_fetch_failed() {
-    printf 'waifufetch: no se pudo descargar de Danbooru (API caida o sin red). Usando imagen cacheada.\n' >&2
+    printf 'waifufetch: no se pudo descargar de %s (API caida o sin red). Usando imagen cacheada.\n' "$BOORU_SITE" >&2
 }
 
 # Render an image as truecolor half-block ANSI art.
