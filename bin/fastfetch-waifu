@@ -15,6 +15,8 @@ NEXT_URL="$CACHE_DIR/next.url"
 LOCK_FILE="$CACHE_DIR/refresh.lock"
 BUFFER_DIR="$CACHE_DIR/buffer"
 ACTIVE_TAGS_FILE="$CACHE_DIR/active-tags.conf"
+LOGO_IMAGE="$CACHE_DIR/logo.png"
+LOGO_ANSI="$CACHE_DIR/logo.ansi"
 FALLBACK_IMAGE="$HOME/.config/ml4w/assets/ml4w.png"
 API_URL="https://danbooru.donmai.us/posts.json"
 GELBOORU_API_URL="https://gelbooru.com/index.php"
@@ -64,6 +66,8 @@ Waifu options:
   --slide-delay SEC    Tiempo inicial entre imagenes en slideshow (default: 8)
   --collage [COUNT]    Muestra un collage de imagenes adaptado a la terminal
   --buffer-count       Muestra cuantas imagenes hay en el buffer
+  --doctor             Diagnostico: terminal, config, logo y cache
+  --ensure-logo        Genera el logo (ANSI) desde la imagen actual y sale
   --image-tags         Muestra artist, copyright y characters de la imagen actual
   --image-tags-fastfetch
                        Muestra tags con filas extra alineadas para fastfetch
@@ -407,12 +411,79 @@ warn_fetch_failed() {
     printf 'waifufetch: no se pudo descargar de Danbooru (API caida o sin red). Usando imagen cacheada.\n' >&2
 }
 
-# Render an image as colored half-blocks using fastfetch's built-in chafa.
-# Needed on terminals without kitty graphics protocol or sixel (e.g. alacritty).
-render_chafa_image() {
+# Render an image as truecolor half-block ANSI art.
+#
+# fastfetch can only draw image logos itself when libchafa.so (the optional
+# "chafa" dependency) is installed; when it is missing fastfetch silently
+# falls back to the distro ASCII logo. Rendering the blocks here removes that
+# dependency completely: any terminal with 24-bit color shows the picture.
+render_ansi_logo() {
+    local image="$1"
+    local out="$2"
+    local cols="${3:-33}"
+    local max_lines="${4:-22}"
+
+    [[ -s "$image" ]] || return 1
+
+    magick "$image[0]" -auto-orient -background '#101010' -alpha remove -alpha off \
+        -resize "${cols}x$((max_lines * 2))" -depth 8 txt:- 2>/dev/null \
+        | sed -nE 's/^([0-9]+),([0-9]+): \(([0-9]+),([0-9]+),([0-9]+).*/\1 \2 \3 \4 \5/p' \
+        | awk -v block="▀" '
+            BEGIN { esc = sprintf("%c", 27) }
+            NF == 5 {
+                key = $2 "," $1
+                R[key] = $3; G[key] = $4; B[key] = $5
+                if ($1 > maxx) maxx = $1
+                if ($2 > maxy) maxy = $2
+            }
+            END {
+                for (line = 0; line <= int(maxy / 2); line++) {
+                    y1 = line * 2; y2 = y1 + 1; buf = ""
+                    for (x = 0; x <= maxx; x++) {
+                        k1 = y1 "," x
+                        buf = buf esc "[38;2;" R[k1] ";" G[k1] ";" B[k1] "m"
+                        if (y2 <= maxy) {
+                            k2 = y2 "," x
+                            buf = buf esc "[48;2;" R[k2] ";" G[k2] ";" B[k2] "m"
+                        }
+                        buf = buf block
+                    }
+                    printf "%s%s[0m\n", buf, esc
+                }
+            }' > "$out"
+
+    [[ -s "$out" ]]
+}
+
+logo_columns() {
+    local width
+
+    width="$(sed -nE 's/^[[:space:]]*"width"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" 2>/dev/null | head -n 1)"
+
+    if [[ "$width" =~ ^[0-9]+$ && "$width" -ge 8 ]]; then
+        printf '%s\n' "$width"
+    else
+        printf '33\n'
+    fi
+}
+
+# "ansi" (default, no extra libs) or "chafa" (needs the chafa package).
+logo_mode() {
+    local mode
+
+    mode="$(sed -nE 's/^[[:space:]]*LOGO_MODE[[:space:]]*=[[:space:]]*["'\'']?([a-z]+)["'\'']?.*/\1/p' "$SOURCE_FILE" 2>/dev/null | tail -n 1)"
+
+    case "${mode:-ansi}" in
+        chafa | ansi) printf '%s\n' "${mode:-ansi}" ;;
+        *) printf 'ansi\n' ;;
+    esac
+}
+
+# Print an image as ANSI art (history previews, slideshow, collage).
+show_ansi_image() {
     local image="$1"
     local width="${2:-}"
-    local cols
+    local cols tmp
 
     if [[ -z "$width" ]]; then
         cols="$(terminal_cells 2>/dev/null | cut -d' ' -f1)"
@@ -422,8 +493,14 @@ render_chafa_image() {
         width=80
     fi
 
-    fastfetch --logo "$image" --logo-type chafa --logo-width "$width" \
-        --logo-padding 0 --structure none
+    tmp="$(temp_png ansi)"
+    if ! render_ansi_logo "$image" "$tmp" "$width" 200; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    cat "$tmp"
+    rm -f "$tmp"
 }
 
 tags_config_changed() {
@@ -549,12 +626,21 @@ download_waifu() {
 }
 
 cleanup_cache() {
+    local current_target old_image
+
     find "$CACHE_DIR" -maxdepth 1 -type f -name 'waifu.*' -delete 2>/dev/null || true
+
+    # Buffer images keep their download mtime when promoted, so the current
+    # image can look "old" and get rotated out from under the logo symlink.
+    current_target="$(readlink -f "$CURRENT_IMAGE" 2>/dev/null || true)"
 
     find "$CACHE_DIR" -maxdepth 1 -type f -name 'current-*.png' -printf '%T@ %p\n' 2>/dev/null \
         | sort -rn \
         | awk -v keep="$BUFFER_SIZE" 'NR > keep {print $2}' \
         | while IFS= read -r old_image; do
+            if [[ -n "$current_target" && "$old_image" == "$current_target" ]]; then
+                continue
+            fi
             rm -f "$old_image" "${old_image%.*}.url" "${old_image%.*}.tags"
         done
 }
@@ -566,18 +652,51 @@ clear_buffer() {
 }
 
 buffer_count() {
+    local count
+
     if [[ ! -d "$BUFFER_DIR" ]]; then
         printf '0\n'
         return 0
     fi
 
-    find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' -exec sh -c '
+    count="$(find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' -exec sh -c '
         count=0
         for image do
             [ -s "$image" ] && [ -s "${image%.*}.url" ] && count=$((count + 1))
         done
         printf "%s\n" "$count"
-    ' sh {} + 2>/dev/null || printf '0\n'
+    ' sh {} + 2>/dev/null || true)"
+
+    printf '%s\n' "${count:-0}"
+}
+
+# Keeps ~/.cache/fastfetch/waifus/logo.png (what config.jsonc points at) in
+# sync with the current image. The rotating current.png symlink can go stale
+# after cache rotation or a tag switch, and fastfetch silently falls back to
+# the distro ASCII logo when its logo file is missing.
+ensure_logo_image() {
+    local target mode
+
+    target="$(readlink -f "$CURRENT_IMAGE" 2>/dev/null || true)"
+    mode="$(logo_mode)"
+
+    if [[ -n "$target" && -s "$target" ]]; then
+        if [[ "$mode" == "ansi" ]]; then
+            if [[ ! -s "$LOGO_ANSI" || "$target" -nt "$LOGO_ANSI" ]]; then
+                render_ansi_logo "$target" "$LOGO_ANSI" "$(logo_columns)" 22 || true
+            fi
+            [[ -s "$LOGO_ANSI" ]]
+            return
+        fi
+
+        if [[ ! -s "$LOGO_IMAGE" || "$target" -nt "$LOGO_IMAGE" ]]; then
+            cp -f "$target" "$LOGO_IMAGE" 2>/dev/null || true
+        fi
+        [[ -s "$LOGO_IMAGE" ]]
+        return
+    fi
+
+    [[ -s "$LOGO_IMAGE" || -s "$LOGO_ANSI" ]]
 }
 
 fill_buffer() {
@@ -621,6 +740,7 @@ promote_file_as_current() {
         mv "$tags_file" "$unique_tags"
     fi
     ln -sfn "$unique" "$CURRENT_IMAGE"
+    cp -f "$unique" "$LOGO_IMAGE" 2>/dev/null || true
 }
 
 promote_buffer_image() {
@@ -663,6 +783,8 @@ refresh_buffer_async() {
 choose_logo() {
     if [[ -s "$CURRENT_IMAGE" ]]; then
         readlink -f "$CURRENT_IMAGE"
+    elif [[ -s "$LOGO_IMAGE" ]]; then
+        printf '%s\n' "$LOGO_IMAGE"
     else
         printf '%s\n' "$FALLBACK_IMAGE"
     fi
@@ -684,6 +806,7 @@ promote_next_image() {
         cp "${NEXT_IMAGE%.*}.tags" "$unique_tags"
     fi
     ln -sfn "$unique" "$CURRENT_IMAGE"
+    cp -f "$unique" "$LOGO_IMAGE" 2>/dev/null || true
 }
 
 post_url_for_logo() {
@@ -875,7 +998,7 @@ show_history_image() {
     elif command -v magick >/dev/null 2>&1 && command -v fastfetch >/dev/null 2>&1; then
         tmp="$(temp_png history-thumb)"
         magick "$image[0]" -auto-orient -resize '360x360>' "$tmp"
-        render_chafa_image "$tmp" 36 || printf 'image: %s\n' "$image"
+        show_ansi_image "$tmp" 36 || printf 'image: %s\n' "$image"
         rm -f "$tmp"
     else
         printf 'image: %s\n' "$image"
@@ -1050,7 +1173,7 @@ render_slideshow_image() {
     elif command -v img2sixel >/dev/null 2>&1; then
         img2sixel "$image" || printf 'image: %s\n' "$image"
     else
-        render_chafa_image "$image" || printf 'image: %s\n' "$image"
+        show_ansi_image "$image" || printf 'image: %s\n' "$image"
     fi
 }
 
@@ -1359,7 +1482,7 @@ show_collage() {
         elif command -v img2sixel >/dev/null 2>&1; then
             img2sixel "$output" || printf 'collage: %s\n' "$output"
         else
-            render_chafa_image "$output" || printf 'collage: %s\n' "$output"
+            show_ansi_image "$output" || printf 'collage: %s\n' "$output"
         fi
         printf '\033[?25h\033[0m\n'
     else
@@ -1367,6 +1490,104 @@ show_collage() {
     fi
 
     refresh_buffer_async
+}
+
+doctor() {
+    local logo current_target target_img a b cfg_type cfg_source chafa_ok
+
+    load_site
+    load_auth
+
+    printf 'waifufetch doctor\n\n'
+    printf 'entorno\n'
+    printf '  TERM=%s TERM_PROGRAM=%s COLORTERM=%s kitty=%s\n' \
+        "${TERM:-?}" "${TERM_PROGRAM:-?}" "${COLORTERM:-?}" "${KITTY_WINDOW_ID:-no}"
+    printf '  HOME=%s\n' "$HOME"
+    printf '  config: %s\n' "$CONFIG_DIR"
+    printf '  sitio: %s\n' "$BOORU_SITE"
+
+    if [[ "$BOORU_SITE" == "gelbooru" ]]; then
+        if [[ -n "${GELBOORU_API_KEY:-}" && -n "${GELBOORU_USER_ID:-}" ]]; then
+            printf '  credenciales gelbooru: ok (user_id %s)\n' "$GELBOORU_USER_ID"
+        else
+            printf '  credenciales gelbooru: FALTAN en %s\n' "$GELBOORU_AUTH_FILE"
+        fi
+    fi
+
+    printf '\nfastfetch\n'
+    printf '  version: %s\n' "$(fastfetch --version 2>/dev/null | head -n 1)"
+    chafa_ok="no"
+    if fastfetch --list-features 2>/dev/null | tr ' ' '\n' | grep -qx chafa; then
+        chafa_ok="si"
+    fi
+    printf '  soporte chafa: %s\n' "$chafa_ok"
+
+    if [[ -f "$CONFIG_DIR/config.jsonc" ]]; then
+        cfg_type="$(sed -nE 's/^[[:space:]]*"type"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG_DIR/config.jsonc" | head -n 1)"
+        cfg_source="$(sed -nE 's/^[[:space:]]*"source"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG_DIR/config.jsonc" | head -n 1)"
+        printf '  config.jsonc: logo type=%s source=%s\n' "${cfg_type:--}" "${cfg_source:--}"
+    else
+        printf '  config.jsonc: FALTA (%s)\n' "$CONFIG_DIR/config.jsonc"
+    fi
+
+    ensure_logo_image || true
+
+    printf '\nimagenes\n'
+    printf '  buffer: %s/%s\n' "$(buffer_count)" "$BUFFER_SIZE"
+
+    current_target="$(readlink -f "$CURRENT_IMAGE" 2>/dev/null || true)"
+    if [[ -n "$current_target" && -s "$current_target" ]]; then
+        printf '  current.png: ok -> %s (%s)\n' \
+            "$(basename "$current_target")" \
+            "$(magick identify -format '%wx%h' "$current_target[0]" 2>/dev/null || echo '?')"
+    else
+        printf '  current.png: ROTO (apunta a %s)\n' "${current_target:-nada}"
+    fi
+
+    if [[ "$(logo_mode)" == "chafa" ]]; then
+        if [[ -s "$LOGO_IMAGE" ]]; then
+            printf '  logo.png: ok (%s)\n' "$(magick identify -format '%wx%h' "$LOGO_IMAGE[0]" 2>/dev/null || echo '?')"
+        else
+            printf '  logo.png: FALTA\n'
+        fi
+    fi
+
+    logo="$(choose_logo)"
+    printf '  logo elegido: %s\n' "${logo:-(ninguno)}"
+
+    printf '\nrender\n'
+    mode="$(logo_mode)"
+    printf '  modo de logo: %s\n' "$mode"
+
+    if [[ "$mode" == "ansi" ]]; then
+        if [[ -s "$LOGO_ANSI" ]] && grep -q '38;2;' "$LOGO_ANSI" 2>/dev/null; then
+            printf '  logo ANSI: OK (%s lineas, %s KB, color 24-bit)\n' \
+                "$(wc -l < "$LOGO_ANSI")" "$(( $(wc -c < "$LOGO_ANSI") / 1024 ))"
+        else
+            printf '  logo ANSI: FALLA (no se pudo generar)\n'
+        fi
+    else
+        if fastfetch --list-features 2>/dev/null | tr ' ' '\n' | grep -qx chafa; then
+            printf '  chafa compilado en fastfetch: si\n'
+        else
+            printf '  chafa compilado en fastfetch: NO\n'
+        fi
+        if ldconfig -p 2>/dev/null | grep -q 'libchafa\.so'; then
+            printf '  libchafa instalada: si\n'
+        else
+            printf '  libchafa instalada: NO -> fastfetch pinta el ASCII de la distro\n'
+        fi
+    fi
+
+    if [[ "$mode" == "ansi" ]]; then
+        if [[ -t 1 ]]; then
+            printf '  TTY: si\n'
+        else
+            printf '  TTY: NO (el logo ANSI se dibuja igual, pero fastfetch recorta el layout)\n'
+        fi
+    fi
+
+    printf '\nArreglo rapido: waifufetch --prefetch-buffer && waifufetch\n'
 }
 
 TAG_OVERRIDE=""
@@ -1383,6 +1604,8 @@ PRINT_BUFFER_COUNT=0
 PRINT_IMAGE_TAGS=0
 PRINT_IMAGE_TAGS_FASTFETCH=0
 OPEN_SOURCE=0
+DOCTOR=0
+ENSURE_LOGO=0
 SHOW_HISTORY=0
 HISTORY_LIMIT=10
 TAGS_CHANGED=0
@@ -1460,6 +1683,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --image-tags-fastfetch)
             PRINT_IMAGE_TAGS_FASTFETCH=1
+            shift
+            ;;
+        --doctor)
+            DOCTOR=1
+            shift
+            ;;
+        --ensure-logo)
+            ENSURE_LOGO=1
             shift
             ;;
         --open-source)
@@ -1555,6 +1786,16 @@ if [[ "$PRINT_IMAGE_TAGS_FASTFETCH" -eq 1 ]]; then
     exit 0
 fi
 
+if [[ "$ENSURE_LOGO" -eq 1 ]]; then
+    ensure_logo_image || true
+    exit 0
+fi
+
+if [[ "$DOCTOR" -eq 1 ]]; then
+    doctor
+    exit 0
+fi
+
 if [[ "$OPEN_SOURCE" -eq 1 ]]; then
     open_source_url
     exit 0
@@ -1620,16 +1861,26 @@ if [[ "$SHOW_SLIDESHOW" -eq 1 ]]; then
     exit 0
 fi
 
-logo="$(choose_logo)"
-if [[ ! -s "$logo" ]] || [[ ! -r "$logo" ]]; then
+ensure_logo_image || true
+
+source_image="$(choose_logo)"
+
+if [[ "$(logo_mode)" == "ansi" && -s "$LOGO_ANSI" ]]; then
+    logo="$LOGO_ANSI"
+    LOGO_ARGS=(--logo "$LOGO_ANSI" --logo-type file-raw)
+elif [[ -s "$source_image" && -r "$source_image" ]]; then
+    logo="$source_image"
+    LOGO_ARGS=(--logo "$logo")
+else
     warn_fetch_failed
-    logo="none"
+    LOGO_ARGS=(--logo none)
 fi
-post_url="$(post_url_for_logo "$logo")"
+
+post_url="$(post_url_for_logo "$source_image")"
 export FASTFETCH_WAIFU_SOURCE="$post_url"
 export FASTFETCH_WAIFU_BUFFER="${FASTFETCH_WAIFU_BUFFER:-$(buffer_count)/$BUFFER_SIZE}"
-export FASTFETCH_WAIFU_TAGS="$(tags_for_logo "$logo")"
-fastfetch --logo "$logo" "${FASTFETCH_ARGS[@]}"
+export FASTFETCH_WAIFU_TAGS="$(tags_for_logo "$source_image")"
+fastfetch "${LOGO_ARGS[@]}" "${FASTFETCH_ARGS[@]}"
 status=$?
 
 if [[ "$FORCED_REFRESH" -eq 1 ]]; then

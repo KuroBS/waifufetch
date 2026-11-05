@@ -11,7 +11,7 @@ This fork (branched from [KuroBS/waifufetch](https://github.com/KuroBS/waifufetc
 - **Rating translation** between sites: `rating:g|s|q|e` (danbooru style) is sent as `rating:general|sensitive|questionable|explicit` on Gelbooru, and vice versa. Existing configs keep working.
 - **Hotlink fix**: Gelbooru's image CDN redirects to the post page unless a `Referer: https://gelbooru.com/` header is sent.
 - **Survives API outages**: an unreachable API no longer aborts the script; it warns and keeps showing the cached image.
-- **Renders in terminals without graphics protocol** (alacritty, xterm, ...): fastfetch's built-in `chafa` backend is used instead of `logo.type: "auto"`, which dumps raw bytes on those terminals. History previews, slideshow and collage fall back to chafa too.
+- **Renders without libchafa**: fastfetch only draws image logos when the optional `chafa` library is installed; when it is missing fastfetch silently prints the distro ASCII logo (tags show, picture does not). This fork pre-renders the picture as truecolor ANSI half-blocks (`logo.ansi`) with ImageMagick and prints it via `logo.type: "file-raw"`, so the image shows in alacritty, xterm, kitty, tmux... with no extra packages. History previews, slideshow and collage use the same renderer.
 - **Clicking a tag keeps the rating filter**, so a click never drops the SFW restriction.
 
 ## Features (upstream)
@@ -25,10 +25,25 @@ This fork (branched from [KuroBS/waifufetch](https://github.com/KuroBS/waifufetc
 - Manual edits to `waifu-tags.conf` are detected and refresh the image buffer.
 - History command with image preview, tags, and source.
 
+## Why the picture did not show (upstream bug)
+
+`fastfetch` has `--logo-type chafa` compiled in, but it loads `libchafa.so` at
+runtime (Arch package marks `chafa` as an *optional* dependency). Without that
+library it silently falls back to the distro ASCII logo while still printing
+all modules, so it looks like the config is fine but the image is "missing".
+`--logo-type kitty`/`sixel` fall back the same way on terminals without those
+protocols.
+
+This fork sidesteps the problem: the image is converted once to ANSI blocks
+(`~/.cache/fastfetch/waifus/logo.ansi`) and fastfetch just prints that file
+with `logo.type: "file-raw"`. If you later install `chafa` as root and prefer
+its dithering, set `LOGO_MODE=chafa` in
+`~/.config/fastfetch/waifufetch-source.conf`.
+
 ## Requirements
 
 - `bash`
-- `fastfetch` (compiled with the `chafa` feature for terminals without image protocols)
+- `fastfetch` (image support does *not* require the optional `chafa` library: this fork renders the blocks itself)
 - `curl`
 - `jq`
 - ImageMagick `magick`
@@ -111,6 +126,22 @@ waifufetch --collage 12
 ```
 
 ## Configuration
+
+### Logo rendering
+
+`LOGO_MODE` in `~/.config/fastfetch/waifufetch-source.conf`:
+
+```text
+LOGO_MODE=ansi    # default: ImageMagick renders the blocks, works everywhere
+LOGO_MODE=chafa   # only if the chafa package (libchafa.so) is installed
+```
+
+The block width follows `logo.width` in `~/.config/fastfetch/config.jsonc`
+(33 columns by default, which fits an 80-column terminal next to the modules).
+
+A shell greeting can call `waifufetch-greeting` instead of `fastfetch`: it
+regenerates `logo.ansi` when the image changed and never leaves the distro
+ASCII logo on screen.
 
 ### Image source
 

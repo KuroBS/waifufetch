@@ -2,8 +2,8 @@
 {
     "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
     "logo": {
-        "source": "~/.cache/fastfetch/waifus/current.png", // Updated by fastfetch-waifu
-        "type": "chafa",                   // alacritty has no image protocol; 'auto' dumps raw bytes here. chafa renders as colored blocks.
+        "source": "~/.cache/fastfetch/waifus/logo.ansi", // Truecolor blocks kept by fastfetch-waifu
+        "type": "file-raw",                // Pre-rendered ANSI art: no libchafa/libmagick needed by fastfetch
         "width": 33,                       // Adjust width (in characters)
         "padding": {
             "top": 1,

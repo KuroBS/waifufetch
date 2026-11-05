@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+
+# Greeting wrapper: makes sure fastfetch has a logo to show.
+#
+# fastfetch only draws image logos when libchafa.so is installed; otherwise it
+# silently prints the distro ASCII logo. This fork pre-renders the picture as
+# truecolor ANSI blocks (logo.ansi) and fastfetch prints that file verbatim,
+# so the greeting always shows the waifu.
+#
+# It never blocks the shell for long: regenerating the blocks takes ~0.3s and
+# if there is no image at all it refills the cache in the background.
+
+set -uo pipefail
+
+cache_dir="$HOME/.cache/fastfetch/waifus"
+logo="$cache_dir/logo.ansi"
+current="$cache_dir/current.png"
+waifu="$HOME/.local/bin/waifufetch"
+
+if [[ -x "$waifu" ]]; then
+    target="$(readlink -f "$current" 2>/dev/null || true)"
+    if [[ -n "$target" && -s "$target" ]]; then
+        if [[ ! -s "$logo" || "$target" -nt "$logo" ]]; then
+            "$waifu" --ensure-logo >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if [[ ! -s "$logo" ]]; then
+        # Nothing cached yet: fill the cache for the next terminal.
+        mkdir -p "$cache_dir" 2>/dev/null || true
+        nohup "$waifu" >/dev/null 2>&1 &
+    fi
+fi
+
+exec fastfetch "$@"
