@@ -84,12 +84,12 @@
         {
             "key": "│ {#34}󰓹 artist   {#keys}│",
             "type": "command",
-            "text": "~/.config/fastfetch/fastfetch-waifu --image-tags-fastfetch"
+            "text": "cat \"$HOME/.cache/fastfetch/waifus/banner/tags.txt\""
         },
         {
             "key": "│ {#34} source   {#keys}│",
             "type": "command",
-            "text": "if [ -n \"$FASTFETCH_WAIFU_SOURCE\" ]; then printf '\\033]8;;%s\\033\\\\source\\033]8;;\\033\\\\' \"$FASTFETCH_WAIFU_SOURCE\"; fi"
+            "text": "cat \"$HOME/.cache/fastfetch/waifus/banner/source.txt\""
         },
         {
             "key": "╰────────────╯",

@@ -153,8 +153,11 @@ Opening a terminal is split into a background helper and a fast painter:
   picked, the kitty escape pre-rendered, the blank logo and the tag rows
   resolved - everything the painter needs.
 - **`waifufetch-paint`** (what the greeting actually runs in kitty): pops one
-  ready banner, runs fastfetch and cats two files. Measured at ~0.2 s instead
-  of ~1.5-2 s. When the queue is empty it falls back to the full `waifufetch`.
+  ready banner, runs fastfetch and cats files. Measured at ~0.1 s instead of
+  ~1.5-2 s. When the queue is empty it falls back to the full `waifufetch`.
+- The config's tag/source rows are pre-formatted by `waifufetch-banner-files`
+  and the config just `cat`s them: the old module spawned the whole script
+  (~220 ms); fastfetch with this config runs in ~35 ms.
 - Manual commands (`waifufetch`, `--slideshow`, ...) keep working unchanged.
 
 Both the helper and its downloads run at `nice +10`, so they never compete

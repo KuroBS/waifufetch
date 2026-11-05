@@ -36,9 +36,16 @@ while :; do
     if [[ -x "$waifu" ]]; then
         ready="$(find "$queue" -maxdepth 1 -type f -name '*.state' 2>/dev/null | wc -l)"
         ready="${ready:-0}"
+        bufsz="$(find "$cache_dir/buffer" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)"
+        bufsz="${bufsz:-0}"
         if (( ready < target )); then
-            # Queue first: every pass prepares one banner; the buffer gets
-            # topped up one image at a time in the idle branch below.
+            if (( bufsz < 4 )); then
+                # Buffer too thin to feed the queue: refill a few images first
+                # so every queue entry does not wait for its own download.
+                WAIFUFETCH_FILL_LIMIT=3 "$waifu" --prefetch-buffer >/dev/null 2>&1 || true
+                sleep 1
+                continue
+            fi
             WAIFUFETCH_LOGO_MODE=graphics "$waifu" --prepare-next >/dev/null 2>&1 || true
             sleep 1
             continue

@@ -39,15 +39,22 @@ fi
 
 [[ -n "$state" && -r "$state" ]] || fallback "$@"
 
-IFS=$'\t' read -r image cols lines esc blank source tags text_col pad_top hoffset < "$state" || fallback "$@"
-[[ -s "$image" && -s "$esc" && -s "$blank" ]] || { rm -f "$state"; fallback "$@"; }
+IFS=$'\t' read -r ver image cols lines esc blank source tags_file source_file text_col pad_top hoffset < "$state" || fallback "$@"
+[[ "$ver" == "v2" ]] || { rm -f "$state"; fallback "$@"; }
+[[ -s "$image" && -s "$esc" && -s "$blank" && -s "$tags_file" && -s "$source_file" ]] || { rm -f "$state"; fallback "$@"; }
 
 # Consume it so the next terminal shows a different picture.
 rm -f "$state"
 
 export FASTFETCH_WAIFU_SOURCE="$source"
-export FASTFETCH_WAIFU_TAGS="$tags"
 export FASTFETCH_WAIFU_TEXT_COLUMN="$text_col"
+
+# Put this banner's pre-formatted rows where the fastfetch config cats them.
+banner="$HOME/.cache/fastfetch/waifus/banner"
+mkdir -p "$banner" 2>/dev/null || true
+cp -f "$tags_file" "$banner/tags.txt" 2>/dev/null || true
+cp -f "$source_file" "$banner/source.txt" 2>/dev/null || true
+rm -f "$tags_file" "$source_file" "$blank"
 
 out="$(mktemp --tmpdir="$cache" paint.XXXXXX 2>/dev/null)" || fallback "$@"
 

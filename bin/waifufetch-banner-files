@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+# Writes the pre-formatted tag rows and the source link for the current image
+# to plain files, so fastfetch's config can `cat` them instead of spawning the
+# whole waifufetch script (that was the most expensive module, ~220ms).
+#
+# Input via env (set by waifufetch / the helper / the painter):
+#   FASTFETCH_WAIFU_TAGS          "artist: a b" lines
+#   FASTFETCH_WAIFU_SOURCE        post url
+#   FASTFETCH_WAIFU_TEXT_COLUMN   box column for continuation lines
+
+set -uo pipefail
+
+dir="${WAIFUFETCH_BANNER_DIR:-$HOME/.cache/fastfetch/waifus/banner}"
+tags_out="${1:-$dir/tags.txt}"
+source_out="${2:-$dir/source.txt}"
+tags="${FASTFETCH_WAIFU_TAGS:-}"
+source_url="${FASTFETCH_WAIFU_SOURCE:-}"
+col="${FASTFETCH_WAIFU_TEXT_COLUMN:-37}"
+
+tcols=100
+if command -v tput >/dev/null 2>&1; then
+    tcols="$(tput cols 2>/dev/null || printf '100')"
+fi
+[[ "$tcols" =~ ^[0-9]+$ && "$tcols" -gt 0 ]] || tcols=100
+avail=$((tcols - col - 17))
+(( avail < 12 )) && avail=12
+
+mkdir -p "$(dirname "$tags_out")" "$(dirname "$source_out")" 2>/dev/null || true
+
+# ---- tags ----
+: > "$tags_out"
+first=1
+while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    kind="${line%%:*}"
+    value="${line#*: }"
+    case "$kind" in
+        artist) label="artist   " ;;
+        copyright) label="copyright" ;;
+        characters) label="character" ;;
+        *) label="tag      " ;;
+    esac
+    for tag in $value; do
+        [[ -n "$tag" ]] || continue
+        if (( ${#tag} > avail )); then
+            show="${tag:0:$((avail - 1))}…"
+        else
+            show="$tag"
+        fi
+        if command -v jq >/dev/null 2>&1; then
+            encoded="$(jq -rn --arg t "$tag" '$t|@uri' 2>/dev/null || printf '%s' "$tag")"
+        else
+            encoded="$tag"
+        fi
+        if (( first == 1 )); then
+            printf '\033]8;;waifufetch-tag://set?tag=%s\033\\%s\033]8;;\033\\' "$encoded" "$show" >> "$tags_out"
+            first=0
+        else
+            printf '\n\033[%sC│ \033[34m󰓹 %s\033[0m│ \033]8;;waifufetch-tag://set?tag=%s\033\\%s\033]8;;\033\\' "$col" "$label" "$encoded" "$show" >> "$tags_out"
+        fi
+    done
+done <<<"$tags"
+(( first == 1 )) && printf '%s\n' '-' >> "$tags_out"
+
+# ---- source ----
+: > "$source_out"
+if [[ -n "$source_url" ]]; then
+    printf '\033]8;;%s\033\\source\033]8;;\033\\' "$source_url" > "$source_out"
+fi
+
+exit 0
