@@ -18,12 +18,9 @@ current="$cache_dir/current.png"
 waifu="$HOME/.local/bin/waifufetch"
 
 if [[ -x "$waifu" ]]; then
-    target="$(readlink -f "$current" 2>/dev/null || true)"
-    if [[ -n "$target" && -s "$target" ]]; then
-        if [[ ! -s "$logo" || "$target" -nt "$logo" ]]; then
-            "$waifu" --ensure-logo >/dev/null 2>&1 || true
-        fi
-    fi
+    # --ensure-logo is cheap (0.07s) when nothing changed and knows how to
+    # spot a new image or a resized terminal on its own.
+    "$waifu" --ensure-logo >/dev/null 2>&1 || true
 
     if [[ ! -s "$logo" ]]; then
         # Nothing cached yet: fill the cache for the next terminal.

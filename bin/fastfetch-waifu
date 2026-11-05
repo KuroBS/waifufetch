@@ -17,6 +17,7 @@ BUFFER_DIR="$CACHE_DIR/buffer"
 ACTIVE_TAGS_FILE="$CACHE_DIR/active-tags.conf"
 LOGO_IMAGE="$CACHE_DIR/logo.png"
 LOGO_ANSI="$CACHE_DIR/logo.ansi"
+LOGO_META="$CACHE_DIR/logo.meta"
 FALLBACK_IMAGE="$HOME/.config/ml4w/assets/ml4w.png"
 API_URL="https://danbooru.donmai.us/posts.json"
 GELBOORU_API_URL="https://gelbooru.com/index.php"
@@ -426,7 +427,8 @@ render_ansi_logo() {
     [[ -s "$image" ]] || return 1
 
     magick "$image[0]" -auto-orient -background '#101010' -alpha remove -alpha off \
-        -resize "${cols}x$((max_lines * 2))" -depth 8 txt:- 2>/dev/null \
+        -filter Lanczos -resize "${cols}x$((max_lines * 2))" \
+        -unsharp 0x0.6+0.4+0.01 -depth 8 txt:- 2>/dev/null \
         | sed -nE 's/^([0-9]+),([0-9]+): \(([0-9]+),([0-9]+),([0-9]+).*/\1 \2 \3 \4 \5/p' \
         | awk -v block="▀" '
             BEGIN { esc = sprintf("%c", 27) }
@@ -465,6 +467,29 @@ logo_columns() {
     else
         printf '33\n'
     fi
+}
+
+# Largest logo that fits next to the module box in the current terminal.
+# Prints "<columns> <lines>".
+logo_geometry() {
+    local cfg_cols tcols tlines box avail_cols avail_lines
+
+    cfg_cols="$(logo_columns)"
+    read -r tcols tlines < <(terminal_cells 2>/dev/null || printf '100 30\n')
+    [[ "$tcols" =~ ^[0-9]+$ ]] || tcols=100
+    [[ "$tlines" =~ ^[0-9]+$ ]] || tlines=30
+
+    box="$(fastfetch_text_column)"
+    avail_cols=$((tcols - box - 2))
+    avail_lines=$((tlines - 1))
+
+    (( avail_cols < cfg_cols )) && avail_cols="$cfg_cols"
+    (( avail_cols < 20 )) && avail_cols=20
+    (( avail_cols > 120 )) && avail_cols=120
+    (( avail_lines < 8 )) && avail_lines=8
+    (( avail_lines > 60 )) && avail_lines=60
+
+    printf '%s %s\n' "$avail_cols" "$avail_lines"
 }
 
 # "ansi" (default, no extra libs) or "chafa" (needs the chafa package).
@@ -675,28 +700,38 @@ buffer_count() {
 # after cache rotation or a tag switch, and fastfetch silently falls back to
 # the distro ASCII logo when its logo file is missing.
 ensure_logo_image() {
-    local target mode
+    local target mode cols lines wanted
 
     target="$(readlink -f "$CURRENT_IMAGE" 2>/dev/null || true)"
     mode="$(logo_mode)"
 
-    if [[ -n "$target" && -s "$target" ]]; then
-        if [[ "$mode" == "ansi" ]]; then
-            if [[ ! -s "$LOGO_ANSI" || "$target" -nt "$LOGO_ANSI" ]]; then
-                render_ansi_logo "$target" "$LOGO_ANSI" "$(logo_columns)" 22 || true
-            fi
-            [[ -s "$LOGO_ANSI" ]]
-            return
-        fi
-
-        if [[ ! -s "$LOGO_IMAGE" || "$target" -nt "$LOGO_IMAGE" ]]; then
-            cp -f "$target" "$LOGO_IMAGE" 2>/dev/null || true
-        fi
-        [[ -s "$LOGO_IMAGE" ]]
+    if [[ -z "$target" || ! -s "$target" ]]; then
+        [[ -s "$LOGO_IMAGE" || -s "$LOGO_ANSI" ]]
         return
     fi
 
-    [[ -s "$LOGO_IMAGE" || -s "$LOGO_ANSI" ]]
+    # The promoted image keeps its download mtime, so comparing timestamps
+    # misses new images: track the exact file plus the terminal geometry.
+    if [[ "$mode" == "ansi" ]]; then
+        read -r cols lines <<<"$(logo_geometry)"
+        wanted="${target}|${cols}x${lines}"
+
+        if [[ ! -s "$LOGO_ANSI" || "$(cat "$LOGO_META" 2>/dev/null || true)" != "$wanted" ]]; then
+            if render_ansi_logo "$target" "$LOGO_ANSI" "$cols" "$lines"; then
+                printf '%s\n' "$wanted" > "$LOGO_META" 2>/dev/null || true
+            fi
+        fi
+
+        [[ -s "$LOGO_ANSI" ]]
+        return
+    fi
+
+    if [[ ! -s "$LOGO_IMAGE" || "$(cat "$LOGO_META" 2>/dev/null || true)" != "$target" ]]; then
+        cp -f "$target" "$LOGO_IMAGE" 2>/dev/null || true
+        printf '%s\n' "$target" > "$LOGO_META" 2>/dev/null || true
+    fi
+
+    [[ -s "$LOGO_IMAGE" ]]
 }
 
 fill_buffer() {
@@ -1563,6 +1598,7 @@ doctor() {
         if [[ -s "$LOGO_ANSI" ]] && grep -q '38;2;' "$LOGO_ANSI" 2>/dev/null; then
             printf '  logo ANSI: OK (%s lineas, %s KB, color 24-bit)\n' \
                 "$(wc -l < "$LOGO_ANSI")" "$(( $(wc -c < "$LOGO_ANSI") / 1024 ))"
+            printf '  geometria: %s (cols x lineas maximas para este terminal)\n' "$(logo_geometry)"
         else
             printf '  logo ANSI: FALLA (no se pudo generar)\n'
         fi
