@@ -17,6 +17,11 @@ logo="$cache_dir/logo.ansi"
 current="$cache_dir/current.png"
 waifu="$HOME/.local/bin/waifufetch"
 
+if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitten >/dev/null 2>&1; then
+    # Inside kitty the image is drawn at full resolution by waifufetch itself.
+    exec "$waifu"
+fi
+
 if [[ -x "$waifu" ]]; then
     # --ensure-logo is cheap (0.07s) when nothing changed and knows how to
     # spot a new image or a resized terminal on its own.

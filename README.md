@@ -132,9 +132,17 @@ waifufetch --collage 12
 `LOGO_MODE` in `~/.config/fastfetch/waifufetch-source.conf`:
 
 ```text
-LOGO_MODE=ansi    # default: ImageMagick renders the blocks, works everywhere
-LOGO_MODE=chafa   # only if the chafa package (libchafa.so) is installed
+LOGO_MODE=auto     # default: graphics inside kitty, ansi everywhere else
+LOGO_MODE=graphics # real pixels via kitty's image protocol (needs kitty+kitten)
+LOGO_MODE=ansi     # ImageMagick-rendered color blocks, works in any terminal
+LOGO_MODE=chafa    # only if the chafa package (libchafa.so) is installed
 ```
+
+**Full resolution needs a terminal with image support.** In kitty the picture is
+drawn by `kitten icat` next to the module box, at the native resolution the
+terminal can show (roughly cell size x logo size, ~430x490 px on a 100x30
+window - about 30x more pixels than the block art). alacritty has no image
+protocol at all, so there the blocks are the ceiling.
 
 The block width follows `logo.width` in `~/.config/fastfetch/config.jsonc`
 (33 columns by default, which fits an 80-column terminal next to the modules).

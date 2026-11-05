@@ -492,16 +492,108 @@ logo_geometry() {
     printf '%s %s\n' "$avail_cols" "$avail_lines"
 }
 
-# "ansi" (default, no extra libs) or "chafa" (needs the chafa package).
+# "ansi" (blocks, works everywhere), "chafa" (needs the chafa package) or
+# "graphics" (real pixels through kitty's image protocol). "auto" picks
+# graphics inside kitty and ansi anywhere else.
 logo_mode() {
     local mode
 
     mode="$(sed -nE 's/^[[:space:]]*LOGO_MODE[[:space:]]*=[[:space:]]*["'\'']?([a-z]+)["'\'']?.*/\1/p' "$SOURCE_FILE" 2>/dev/null | tail -n 1)"
 
-    case "${mode:-ansi}" in
-        chafa | ansi) printf '%s\n' "${mode:-ansi}" ;;
-        *) printf 'ansi\n' ;;
+    case "${mode:-auto}" in
+        graphics | chafa | ansi) printf '%s\n' "$mode" ;;
+        *)
+            if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitten >/dev/null 2>&1 && [[ -t 1 ]]; then
+                printf 'graphics\n'
+            else
+                printf 'ansi\n'
+            fi
+            ;;
     esac
+}
+
+# Pixel size of one character cell, "<w> <h>".
+cell_pixels() {
+    local size w h tcols tlines cw ch
+
+    size="$(kitten icat --print-window-size --stdin=no 2>/dev/null | tr -d '\r' | head -n 1)"
+    read -r tcols tlines < <(terminal_cells 2>/dev/null || printf '100 30\n')
+
+    if [[ "$size" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+        w="${BASH_REMATCH[1]}"
+        h="${BASH_REMATCH[2]}"
+        if [[ "$tcols" =~ ^[0-9]+$ && "$tcols" -gt 0 && "$tlines" =~ ^[0-9]+$ && "$tlines" -gt 0 ]]; then
+            cw=$((w / tcols))
+            ch=$((h / tlines))
+        fi
+    fi
+
+    [[ "$cw" =~ ^[0-9]+$ && "$cw" -gt 0 ]] || cw=8
+    [[ "$ch" =~ ^[0-9]+$ && "$ch" -gt 0 ]] || ch=17
+
+    printf '%s %s\n' "$cw" "$ch"
+}
+
+# Cell rectangle "<cols> <lines>" that keeps the image aspect inside the area
+# left free by the module box.
+graphics_geometry() {
+    local image="$1" maxc maxl iw ih cw ch x y
+
+    read -r maxc maxl < <(logo_geometry)
+    read -r iw ih < <(magick identify -format '%w %h\n' "$image[0]" 2>/dev/null | head -n 1)
+
+    if [[ "$iw" =~ ^[0-9]+$ && "$ih" =~ ^[0-9]+$ && "$iw" -gt 0 && "$ih" -gt 0 ]]; then
+        read -r cw ch < <(cell_pixels)
+        x="$maxc"
+        y=$((x * cw * ih / (ch * iw)))
+        if ((y > maxl)); then
+            y="$maxl"
+            x=$((y * ch * iw / (cw * ih)))
+        fi
+    else
+        x="$maxc"
+        y="$maxl"
+    fi
+
+    ((x < 8)) && x=8
+    ((y < 4)) && y=4
+
+    printf '%s %s\n' "$x" "$y"
+}
+
+# Fastfetch layout with a blank logo area, then the real image drawn on top
+# with kitty's image protocol (full resolution, no block approximation).
+graphics_banner() {
+    local image="$1"
+    local cols lines blank args lines_out rc
+
+    command -v kitten >/dev/null 2>&1 || return 1
+
+    read -r cols lines < <(graphics_geometry "$image")
+    blank="$CACHE_DIR/logo-blank.txt"
+    mkdir -p "$CACHE_DIR" 2>/dev/null || true
+    awk -v n="$lines" -v w="$cols" 'BEGIN { s = ""; for (i = 0; i < w; i++) s = s " "; for (j = 0; j < n; j++) print s }' > "$blank" 2>/dev/null || return 1
+
+    args=(--logo "$blank" --logo-type file-raw)
+
+    # Same args, piped: gives the exact line count fastfetch prints so the
+    # cursor can be moved back to the top-left of the logo area afterwards.
+    lines_out="$(fastfetch "${args[@]}" "${FASTFETCH_ARGS[@]}" 2>/dev/null | wc -l)"
+    [[ "$lines_out" =~ ^[0-9]+$ ]] || lines_out="$lines"
+
+    printf '\033[2J\033[H'
+    fastfetch "${args[@]}" "${FASTFETCH_ARGS[@]}"
+    rc=$?
+
+    printf '\033[%dA\033[1G' "$lines_out"
+    if kitten icat --place "${cols}x${lines}@0x0" --scale-up=no --stdin=no "$image" >/dev/null 2>&1; then
+        printf '\033[%dB\033[1G' "$lines_out"
+        return "$rc"
+    fi
+
+    # Not a kitty graphics terminal after all: let the caller use the blocks.
+    printf '\033[%dB\033[1G' "$lines_out"
+    return 1
 }
 
 # Print an image as ANSI art (history previews, slideshow, collage).
@@ -1592,7 +1684,7 @@ doctor() {
 
     printf '\nrender\n'
     mode="$(logo_mode)"
-    printf '  modo de logo: %s\n' "$mode"
+    printf '  modo de logo: %s (auto -> graphics en kitty, ansi si no)\n' "$mode"
 
     if [[ "$mode" == "ansi" ]]; then
         if [[ -s "$LOGO_ANSI" ]] && grep -q '38;2;' "$LOGO_ANSI" 2>/dev/null; then
@@ -1897,9 +1989,20 @@ if [[ "$SHOW_SLIDESHOW" -eq 1 ]]; then
     exit 0
 fi
 
-ensure_logo_image || true
-
 source_image="$(choose_logo)"
+
+if [[ "$(logo_mode)" == "graphics" && -s "$source_image" && -t 1 ]]; then
+    post_url="$(post_url_for_logo "$source_image")"
+    export FASTFETCH_WAIFU_SOURCE="$post_url"
+    export FASTFETCH_WAIFU_BUFFER="${FASTFETCH_WAIFU_BUFFER:-$(buffer_count)/$BUFFER_SIZE}"
+    export FASTFETCH_WAIFU_TAGS="$(tags_for_logo "$source_image")"
+    if graphics_banner "$source_image"; then
+        exit 0
+    fi
+    # fall through to the ANSI renderer if kitty could not draw the image
+fi
+
+ensure_logo_image || true
 
 if [[ "$(logo_mode)" == "ansi" && -s "$LOGO_ANSI" ]]; then
     logo="$LOGO_ANSI"
