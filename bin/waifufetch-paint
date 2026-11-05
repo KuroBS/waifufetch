@@ -43,6 +43,14 @@ IFS=$'\t' read -r ver image cols lines esc blank source tags_file source_file te
 [[ "$ver" == "v2" ]] || { rm -f "$state"; fallback "$@"; }
 [[ -s "$image" && -s "$esc" && -s "$blank" && -s "$tags_file" && -s "$source_file" ]] || { rm -f "$state"; fallback "$@"; }
 
+# Prepared for a wider terminal than this one? The box would wrap: recompute
+# everything through the full path instead.
+tc_now="$(tput cols 2>/dev/null || printf '100')"
+if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( text_col + 37 > tc_now )); then
+    rm -f "$state"
+    fallback "$@"
+fi
+
 # Consume it so the next terminal shows a different picture.
 rm -f "$state"
 
@@ -54,7 +62,7 @@ banner="$HOME/.cache/fastfetch/waifus/banner"
 mkdir -p "$banner" 2>/dev/null || true
 cp -f "$tags_file" "$banner/tags.txt" 2>/dev/null || true
 cp -f "$source_file" "$banner/source.txt" 2>/dev/null || true
-rm -f "$tags_file" "$source_file" "$blank"
+rm -f "$tags_file" "$source_file"
 
 out="$(mktemp --tmpdir="$cache" paint.XXXXXX 2>/dev/null)" || fallback "$@"
 
@@ -64,7 +72,7 @@ rc=$?
 lines_out="$(wc -l < "$out" 2>/dev/null || printf '0')"
 [[ "$lines_out" =~ ^[0-9]+$ && "$lines_out" -gt 0 ]] || lines_out="$lines"
 cat "$out" 2>/dev/null
-rm -f "$out"
+rm -f "$out" "$blank"
 
 # Back to the top-left of the logo area and print the prepared escape.
 printf '\033[%dA\033[1G' "$lines_out"
