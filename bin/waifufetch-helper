@@ -16,7 +16,7 @@ lock="$cache_dir/helper.lock"
 pidfile="$cache_dir/helper.lock.pid"
 waifu="$HOME/.local/bin/waifufetch"
 queue="$cache_dir/paint.queue"
-target="${WAIFUFETCH_QUEUE_TARGET:-3}"
+target="${WAIFUFETCH_QUEUE_TARGET:-6}"
 
 mkdir -p "$cache_dir" 2>/dev/null || true
 
@@ -37,13 +37,13 @@ while :; do
         ready="$(find "$queue" -maxdepth 1 -type f -name '*.state' 2>/dev/null | wc -l)"
         ready="${ready:-0}"
         if (( ready < target )); then
+            # Queue first: every pass prepares one banner; the buffer gets
+            # topped up one image at a time in the idle branch below.
             WAIFUFETCH_LOGO_MODE=graphics "$waifu" --prepare-next >/dev/null 2>&1 || true
-            # Only top the buffer up a couple of images per pass so the queue
-            # gets attention too (a full 20-image prefetch would block it).
-            WAIFUFETCH_FILL_LIMIT=2 "$waifu" --prefetch-buffer >/dev/null 2>&1 || true
             sleep 1
             continue
         fi
+        WAIFUFETCH_FILL_LIMIT=1 "$waifu" --prefetch-buffer >/dev/null 2>&1 || true
     fi
-    sleep 10
+    sleep 8
 done

@@ -898,7 +898,12 @@ prepare_next_banner() {
     (( n >= 3 )) && return 0
 
     # Another image, if there is one buffered; keep the current otherwise.
-    promote_buffer_image >/dev/null 2>&1 || true
+    if ! promote_buffer_image >/dev/null 2>&1; then
+        # Buffer empty: fetch one so the queue keeps rotating instead of
+        # repeating the same picture for every entry.
+        WAIFUFETCH_FILL_LIMIT=1 fill_buffer >/dev/null 2>&1 || true
+        promote_buffer_image >/dev/null 2>&1 || true
+    fi
     image="$(choose_logo)"
     [[ -s "$image" ]] || return 1
 
@@ -917,10 +922,15 @@ prepare_next_banner() {
     source="$(post_url_for_logo "$image")"
     tags="$(tags_for_logo "$image")"
 
+    # Write atomically so the painter never reads a half-written state while
+    # the helper is preparing it (a partial line used to force the slow
+    # fallback path).
+    local state_path="$PAINT_QUEUE/$(date +%s%N).state"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$image" "$cols" "$lines" "$escf" "$blank" "$source" "$tags" \
         "$text_col" "$pad_top" "$hoffset" \
-        > "$PAINT_QUEUE/$(date +%s%N).state" 2>/dev/null || return 1
+        > "$state_path.tmp" 2>/dev/null || return 1
+    mv -f "$state_path.tmp" "$state_path" 2>/dev/null || return 1
 
     return 0
 }
