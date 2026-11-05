@@ -11,6 +11,9 @@
 
 set -uo pipefail
 
+log="${WAIFUFETCH_LOG:-$HOME/.cache/fastfetch/waifus/paint.log}"
+t0="$(date +%s%N 2>/dev/null || true)"
+
 cache="$HOME/.cache/fastfetch/waifus"
 queue="$cache/paint.queue"
 waifu="$HOME/.local/bin/waifufetch"
@@ -85,4 +88,12 @@ fi
 cat "$esc" 2>/dev/null || true
 printf '\033[%d;1H' "$((lines_out + 1))"
 
+if [[ -n "$t0" ]]; then
+    t1="$(date +%s%N 2>/dev/null || true)"
+    if [[ -n "$t1" ]]; then
+        path_taken="queue"
+        [[ -z "$state" ]] && path_taken="fallback"
+        printf '%s %s path=%s ms=%s\n' "$(date +%H:%M:%S)" "$$" "$path_taken" "$(( (t1 - t0) / 1000000 ))" >> "$log" 2>/dev/null || true
+    fi
+fi
 exit "$rc"

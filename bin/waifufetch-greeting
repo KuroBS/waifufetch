@@ -16,12 +16,17 @@ paint="$HOME/.local/bin/waifufetch-paint"
 helper="$HOME/.local/bin/waifufetch-helper"
 
 # Start the background helper once; it is a no-op when it is already running.
+# Double-fork so the helper is reparented to init and its downloads/render
+# work is never accounted as part of this shell's job (fish's `time` used to
+# include the helper's first pass).
 if [[ -x "$helper" ]]; then
-    if command -v setsid >/dev/null 2>&1; then
-        setsid "$helper" >/dev/null 2>&1 </dev/null &
-    else
-        nohup "$helper" >/dev/null 2>&1 </dev/null &
-    fi
+    (
+        if command -v setsid >/dev/null 2>&1; then
+            setsid "$helper" >/dev/null 2>&1 </dev/null &
+        else
+            nohup "$helper" >/dev/null 2>&1 </dev/null &
+        fi
+    ) 2>/dev/null &
 fi
 
 if [[ ! -x "$waifu" ]]; then

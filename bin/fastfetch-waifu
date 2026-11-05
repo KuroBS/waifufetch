@@ -966,12 +966,15 @@ start_helper() {
     [[ -x "$helper" ]] || return 0
     helper_running && return 0
 
-    # setsid detaches it from our session so it survives the shell closing.
-    if command -v setsid >/dev/null 2>&1; then
-        setsid "$helper" >/dev/null 2>&1 </dev/null &
-    else
-        nohup "$helper" >/dev/null 2>&1 </dev/null &
-    fi
+    # Double-fork: the helper becomes a child of init, so it neither blocks
+    # nor is accounted as part of the caller's job.
+    (
+        if command -v setsid >/dev/null 2>&1; then
+            setsid "$helper" >/dev/null 2>&1 </dev/null &
+        else
+            nohup "$helper" >/dev/null 2>&1 </dev/null &
+        fi
+    ) 2>/dev/null &
     disown 2>/dev/null || true
     return 0
 }
