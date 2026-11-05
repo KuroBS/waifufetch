@@ -19,11 +19,22 @@ if [[ ! -f "$HOME/.config/fastfetch/config.jsonc" ]]; then
 fi
 
 if [[ ! -f "$HOME/.config/fastfetch/waifu-tags.conf" ]]; then
-    printf '%s\n' '1girl rating:g' > "$HOME/.config/fastfetch/waifu-tags.conf"
+    printf '%s\n' '1girl rating:general' > "$HOME/.config/fastfetch/waifu-tags.conf"
 fi
 
 if [[ ! -f "$HOME/.config/fastfetch/waifu-buffer-size.conf" ]]; then
     printf '%s\n' 'BUFFER_SIZE=20' > "$HOME/.config/fastfetch/waifu-buffer-size.conf"
+fi
+
+if [[ ! -f "$HOME/.config/fastfetch/gelbooru-auth.conf" ]]; then
+    umask 077
+    cat > "$HOME/.config/fastfetch/gelbooru-auth.conf" <<'EOF'
+# Gelbooru credentials (https://gelbooru.com/index.php?page=account&s=options)
+GELBOORU_API_KEY=''
+GELBOORU_USER_ID=''
+EOF
+    chmod 600 "$HOME/.config/fastfetch/gelbooru-auth.conf"
+    needs_gelbooru_auth=1
 fi
 
 sed "s#Exec=.*#Exec=$HOME/.local/bin/waifufetch-tag-handler %u#" \
@@ -35,4 +46,8 @@ if command -v xdg-mime >/dev/null 2>&1; then
 fi
 
 printf 'Installed waifufetch.\n'
-printf 'Run: waifufetch\n'
+if [[ "${needs_gelbooru_auth:-0}" -eq 1 ]]; then
+    printf 'Fill in your Gelbooru credentials: %s\n' "$HOME/.config/fastfetch/gelbooru-auth.conf"
+    printf '  GELBOORU_API_KEY=... and GELBOORU_USER_ID=...\n'
+fi
+printf 'Run: waifufetch --prefetch-buffer && waifufetch\n'

@@ -5,6 +5,8 @@ set -euo pipefail
 CONFIG_DIR="$HOME/.config/fastfetch"
 TAGS_FILE="$CONFIG_DIR/waifu-tags.conf"
 AUTH_FILE="$CONFIG_DIR/danbooru-auth.conf"
+GELBOORU_AUTH_FILE="$CONFIG_DIR/gelbooru-auth.conf"
+SOURCE_FILE="$CONFIG_DIR/waifufetch-source.conf"
 BUFFER_SIZE_FILE="$CONFIG_DIR/waifu-buffer-size.conf"
 CACHE_DIR="$HOME/.cache/fastfetch/waifus"
 CURRENT_IMAGE="$CACHE_DIR/current.png"
@@ -15,6 +17,8 @@ BUFFER_DIR="$CACHE_DIR/buffer"
 ACTIVE_TAGS_FILE="$CACHE_DIR/active-tags.conf"
 FALLBACK_IMAGE="$HOME/.config/ml4w/assets/ml4w.png"
 API_URL="https://danbooru.donmai.us/posts.json"
+GELBOORU_API_URL="https://gelbooru.com/index.php"
+BOORU_SITE="gelbooru"
 USER_AGENT="fastfetch-waifu/1.0"
 COMMAND_NAME="$(basename "$0")"
 CURL_CONNECT_TIMEOUT=3
@@ -48,6 +52,7 @@ Waifu options:
   -t, --tag TAGS       Cambia los tags de Danbooru y los guarda
                        Se puede repetir: --tag 1girl --tag cat_ears
   -r, --rating RATING  Cambia el rating y lo guarda: g, s, q, e o rating:g
+                       (en Gelbooru se traduce a general/sensitive/questionable/explicit)
                        Usa --rating "" para borrar el rating guardado
   --buffer-size SIZE   Cambia el tamano del buffer y del historial
   --prefetch-buffer    Precarga el buffer hasta el tamano configurado y no muestra fastfetch
@@ -101,11 +106,165 @@ EOF
 load_auth() {
     DANBOORU_LOGIN="${DANBOORU_LOGIN:-}"
     DANBOORU_API_KEY="${DANBOORU_API_KEY:-}"
+    GELBOORU_API_KEY="${GELBOORU_API_KEY:-}"
+    GELBOORU_USER_ID="${GELBOORU_USER_ID:-}"
 
     if [[ -f "$AUTH_FILE" ]]; then
         # shellcheck disable=SC1090
         source "$AUTH_FILE"
     fi
+
+    if [[ -f "$GELBOORU_AUTH_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$GELBOORU_AUTH_FILE"
+    fi
+}
+
+load_site() {
+    local site
+
+    if [[ -f "$SOURCE_FILE" ]]; then
+        site="$(sed -nE 's/^[[:space:]]*BOORU_SITE[[:space:]]*=[[:space:]]*["'\'']?([A-Za-z]+)["'\'']?.*/\1/p' "$SOURCE_FILE" | tail -n 1)"
+        if [[ -n "$site" ]]; then
+            BOORU_SITE="$site"
+        fi
+    fi
+
+    BOORU_SITE="${BOORU_SITE:-gelbooru}"
+    case "$BOORU_SITE" in
+        gelbooru | danbooru) ;;
+        *)
+            printf 'Invalid BOORU_SITE: %s (use gelbooru or danbooru)\n' "$BOORU_SITE" >&2
+            BOORU_SITE="gelbooru"
+            ;;
+    esac
+}
+
+# Translate rating tags between sites (danbooru uses g/s/q/e, gelbooru long names).
+translate_tags_for_site() {
+    local tags="$1"
+    local out="" token
+
+    for token in $tags; do
+        case "$BOORU_SITE:$token" in
+            gelbooru:rating:g) token="rating:general" ;;
+            gelbooru:rating:s) token="rating:sensitive" ;;
+            gelbooru:rating:q) token="rating:questionable" ;;
+            gelbooru:rating:e) token="rating:explicit" ;;
+            danbooru:rating:general) token="rating:g" ;;
+            danbooru:rating:sensitive) token="rating:s" ;;
+            danbooru:rating:questionable) token="rating:q" ;;
+            danbooru:rating:explicit) token="rating:e" ;;
+        esac
+        out="${out:+$out }$token"
+    done
+
+    printf '%s\n' "${out:-1girl}"
+}
+
+gelbooru_credentials() {
+    if [[ -z "${GELBOORU_API_KEY:-}" || -z "${GELBOORU_USER_ID:-}" ]]; then
+        printf 'Gelbooru necesita credenciales de API.\n' >&2
+        printf 'Crea %s con:\n' "$GELBOORU_AUTH_FILE" >&2
+        printf "    GELBOORU_API_KEY='your_api_key'\n" >&2
+        printf "    GELBOORU_USER_ID='your_user_id'\n" >&2
+        printf 'Despues: chmod 600 %s\n' "$GELBOORU_AUTH_FILE" >&2
+        return 1
+    fi
+}
+
+# Builds a Gelbooru API url: $1 = s= section, $2 = extra query parts.
+gelbooru_url() {
+    local section="$1"
+    local extra="${2:-}"
+    local base
+
+    base="${GELBOORU_API_URL}?page=dapi&s=${section}&q=index&json=1"
+    base="${base}&api_key=$(jq -rn --arg v "$GELBOORU_API_KEY" '$v|@uri')"
+    base="${base}&user_id=$(jq -rn --arg v "$GELBOORU_USER_ID" '$v|@uri')"
+
+    if [[ -n "$extra" ]]; then
+        base="${base}&${extra}"
+    fi
+
+    printf '%s\n' "$base"
+}
+
+# Gelbooru tag types: 0 general, 1 artist, 3 copyright, 4 character, 5 metadata.
+# Categorizes a post's tag string into the danbooru style tags file.
+write_gelbooru_post_tags() {
+    local post="$1"
+    local tags_output="$2"
+    local tags chunk url response artist="" copyright="" characters="" post_type post_name
+
+    tags="$(jq -r '.tags // empty' <<<"$post" 2>/dev/null || true)"
+
+    if [[ -n "$tags" ]]; then
+        chunk="$(tr ' ' '\n' <<<"$tags" | head -n 60 | tr '\n' ' ')"
+        url="$(gelbooru_url tag "limit=100&names=$(jq -rn --arg v "$chunk" '$v|@uri')")"
+        response="$(curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_API_MAX_TIME" -A "$USER_AGENT" "$url" 2>/dev/null || true)"
+
+        while IFS=$'\t' read -r post_type post_name; do
+            case "$post_type" in
+                1) artist="${artist:+$artist }$post_name" ;;
+                3) copyright="${copyright:+$copyright }$post_name" ;;
+                4) characters="${characters:+$characters }$post_name" ;;
+            esac
+        done < <(jq -r '.tag[]? | "\(.type)\t\(.name)"' <<<"${response:-{\"tag\":[]}}" 2>/dev/null || true)
+    fi
+
+    jq -n \
+        --arg artist "$artist" \
+        --arg copyright "$copyright" \
+        --arg characters "$characters" \
+        '{artist: $artist, copyright: $copyright, characters: $characters}' > "$tags_output"
+}
+
+download_waifu_gelbooru() {
+    local output="$1"
+    local url_output="$2"
+    local tags_output="${output%.*}.tags"
+    local tags encoded url response count index post image_url post_id post_url tmp
+
+    mkdir -p "$CACHE_DIR"
+    load_auth
+    load_site
+    gelbooru_credentials || return 1
+
+    tags="$(translate_tags_for_site "$(build_tags)")"
+    encoded="$(jq -rn --arg v "$tags" '$v|@uri')"
+    url="$(gelbooru_url post "limit=100&tags=${encoded}+sort%3Arandom")"
+
+    response="$(curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_API_MAX_TIME" -A "$USER_AGENT" "$url" 2>/dev/null)" || return 1
+
+    count="$(jq -r '[.post[]? | select((.file_url // "") != "" and ((.file_url | test("\\.(jpe?g|png|gif|webp)$"; "i"))))] | length' <<<"$response" 2>/dev/null || printf '0')"
+    if [[ ! "$count" =~ ^[0-9]+$ || "$count" -lt 1 ]]; then
+        return 1
+    fi
+
+    index=$((RANDOM % count))
+    post="$(jq -c --argjson i "$index" '[.post[]? | select((.file_url // "") != "" and ((.file_url | test("\\.(jpe?g|png|gif|webp)$"; "i"))))][$i]' <<<"$response")"
+    image_url="$(jq -r '.file_url // empty' <<<"$post")"
+    post_id="$(jq -r '.id // empty' <<<"$post")"
+
+    if [[ -z "$image_url" || -z "$post_id" ]]; then
+        return 1
+    fi
+
+    post_url="https://gelbooru.com/index.php?page=post&s=view&id=${post_id}"
+
+    tmp="$(mktemp --tmpdir="$CACHE_DIR" waifu.XXXXXX)"
+    if ! curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_IMAGE_MAX_TIME" -A "$USER_AGENT" -H "Referer: ${GELBOORU_API_URL}/" "$image_url" -o "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! magick "$tmp[0]" -auto-orient -resize '1050x1050>' "$output"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    printf '%s\n' "$post_url" > "$url_output"
+    write_gelbooru_post_tags "$post" "$tags_output"
+    rm -f "$tmp"
 }
 
 read_tags() {
@@ -172,6 +331,9 @@ normalize_rating() {
     rating="${rating#rating:}"
     case "$rating" in
         g|s|q|e)
+            printf 'rating:%s\n' "$rating"
+            ;;
+        general|sensitive|questionable|explicit)
             printf 'rating:%s\n' "$rating"
             ;;
         *)
@@ -241,6 +403,29 @@ mark_active_tags() {
     read_tags > "$ACTIVE_TAGS_FILE"
 }
 
+warn_fetch_failed() {
+    printf 'waifufetch: no se pudo descargar de Danbooru (API caida o sin red). Usando imagen cacheada.\n' >&2
+}
+
+# Render an image as colored half-blocks using fastfetch's built-in chafa.
+# Needed on terminals without kitty graphics protocol or sixel (e.g. alacritty).
+render_chafa_image() {
+    local image="$1"
+    local width="${2:-}"
+    local cols
+
+    if [[ -z "$width" ]]; then
+        cols="$(terminal_cells 2>/dev/null | cut -d' ' -f1)"
+        width="${cols:-80}"
+    fi
+    if [[ ! "$width" =~ ^[0-9]+$ || "$width" -lt 8 ]]; then
+        width=80
+    fi
+
+    fastfetch --logo "$image" --logo-type chafa --logo-width "$width" \
+        --logo-padding 0 --structure none
+}
+
 tags_config_changed() {
     local current_tags active_tags
 
@@ -285,18 +470,30 @@ fetch_tags_for_logo() {
     fi
 
     post_url="$(cat "$url_file")"
-    post_id="$(sed -nE 's#^.*/posts/([0-9]+).*#\1#p' <<<"$post_url")"
+    load_site
+    if [[ "$BOORU_SITE" == "gelbooru" ]]; then
+        post_id="$(sed -nE 's#^.*[?&]id=([0-9]+).*#\1#p' <<<"$post_url")"
+    else
+        post_id="$(sed -nE 's#^.*/posts/([0-9]+).*#\1#p' <<<"$post_url")"
+    fi
     if [[ -z "$post_id" ]]; then
         return 1
     fi
 
     load_auth
+    if [[ "$BOORU_SITE" == "gelbooru" ]]; then
+        url="$(gelbooru_url post "id=${post_id}")"
+        post="$(curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_API_MAX_TIME" -A "$USER_AGENT" "$url" 2>/dev/null)" || return 1
+        write_gelbooru_post_tags "$(jq -c '(.post | if type == "array" then (.[0] // empty) else . end) // empty' <<<"$post")" "$tags_file"
+        return 0
+    fi
+
     url="https://danbooru.donmai.us/posts/${post_id}.json"
     if [[ -n "${DANBOORU_LOGIN:-}" && -n "${DANBOORU_API_KEY:-}" ]]; then
         url="${url}?login=$(jq -rn --arg v "$DANBOORU_LOGIN" '$v|@uri')&api_key=$(jq -rn --arg v "$DANBOORU_API_KEY" '$v|@uri')"
     fi
 
-    post="$(curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_API_MAX_TIME" -A "$USER_AGENT" "$url")" || return 1
+    post="$(curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_API_MAX_TIME" -A "$USER_AGENT" "$url" 2>/dev/null)" || return 1
     write_post_tags "$post" "$tags_file"
 }
 
@@ -305,6 +502,12 @@ download_waifu() {
     local url_output="${2:-${output%.*}.url}"
     local tags_output="${output%.*}.tags"
     local tags encoded response post image_url post_id post_url tmp url
+
+    load_site
+    if [[ "$BOORU_SITE" == "gelbooru" ]]; then
+        download_waifu_gelbooru "$output" "$url_output"
+        return $?
+    fi
 
     mkdir -p "$CACHE_DIR"
     load_auth
@@ -316,7 +519,7 @@ download_waifu() {
         url="${url}&login=$(jq -rn --arg v "$DANBOORU_LOGIN" '$v|@uri')&api_key=$(jq -rn --arg v "$DANBOORU_API_KEY" '$v|@uri')"
     fi
 
-    response="$(curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_API_MAX_TIME" -A "$USER_AGENT" "$url")"
+    response="$(curl -fsSL --compressed --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_API_MAX_TIME" -A "$USER_AGENT" "$url")" || return 1
     post="$(jq -c '
         [.[] | select(
             (.file_url // "") != "" and
@@ -669,6 +872,11 @@ show_history_image() {
         magick "$image[0]" -auto-orient -resize '360x360>' "$tmp"
         img2sixel "$tmp" || true
         rm -f "$tmp"
+    elif command -v magick >/dev/null 2>&1 && command -v fastfetch >/dev/null 2>&1; then
+        tmp="$(temp_png history-thumb)"
+        magick "$image[0]" -auto-orient -resize '360x360>' "$tmp"
+        render_chafa_image "$tmp" 36 || printf 'image: %s\n' "$image"
+        rm -f "$tmp"
     else
         printf 'image: %s\n' "$image"
     fi
@@ -842,7 +1050,7 @@ render_slideshow_image() {
     elif command -v img2sixel >/dev/null 2>&1; then
         img2sixel "$image" || printf 'image: %s\n' "$image"
     else
-        printf 'image: %s\n' "$image"
+        render_chafa_image "$image" || printf 'image: %s\n' "$image"
     fi
 }
 
@@ -1151,7 +1359,7 @@ show_collage() {
         elif command -v img2sixel >/dev/null 2>&1; then
             img2sixel "$output" || printf 'collage: %s\n' "$output"
         else
-            printf 'collage: %s\n' "$output"
+            render_chafa_image "$output" || printf 'collage: %s\n' "$output"
         fi
         printf '\033[?25h\033[0m\n'
     else
@@ -1360,10 +1568,12 @@ fi
 if [[ "$TAGS_CHANGED" -eq 0 ]] && tags_config_changed; then
     clear_buffer
     if [[ "$REFRESH_ONLY" -eq 0 ]]; then
-        download_waifu "$NEXT_IMAGE" "$NEXT_URL"
-        promote_next_image
-        mark_active_tags
-        FORCED_REFRESH=1
+        if download_waifu "$NEXT_IMAGE" "$NEXT_URL" && promote_next_image; then
+            mark_active_tags
+            FORCED_REFRESH=1
+        else
+            warn_fetch_failed
+        fi
     fi
 fi
 
@@ -1373,14 +1583,16 @@ if [[ "$TAGS_CHANGED" -eq 1 ]]; then
     RATING_OVERRIDE=""
     RATING_OVERRIDE_SET=0
     clear_buffer
-    download_waifu "$NEXT_IMAGE" "$NEXT_URL"
-    promote_next_image
-    mark_active_tags
-    FORCED_REFRESH=1
+    if download_waifu "$NEXT_IMAGE" "$NEXT_URL" && promote_next_image; then
+        mark_active_tags
+        FORCED_REFRESH=1
+    else
+        warn_fetch_failed
+    fi
 fi
 
 if [[ "$REFRESH_ONLY" -eq 1 ]]; then
-    fill_buffer
+    fill_buffer || true
     exit 0
 fi
 
@@ -1409,6 +1621,10 @@ if [[ "$SHOW_SLIDESHOW" -eq 1 ]]; then
 fi
 
 logo="$(choose_logo)"
+if [[ ! -s "$logo" ]] || [[ ! -r "$logo" ]]; then
+    warn_fetch_failed
+    logo="none"
+fi
 post_url="$(post_url_for_logo "$logo")"
 export FASTFETCH_WAIFU_SOURCE="$post_url"
 export FASTFETCH_WAIFU_BUFFER="${FASTFETCH_WAIFU_BUFFER:-$(buffer_count)/$BUFFER_SIZE}"

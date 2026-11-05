@@ -19,6 +19,16 @@ config_dir="$HOME/.config/fastfetch"
 tags_file="$config_dir/waifu-tags.conf"
 buffer_dir="$HOME/.cache/fastfetch/waifus/buffer"
 
+# Keep the current rating filter when jumping to a clicked tag, so a click
+# never drops the SFW/rating restriction.
+existing_rating="$(grep -Eo 'rating:[^[:space:]]+' "$tags_file" 2>/dev/null | tail -n 1 || true)"
+if [[ -z "$existing_rating" && "$tag" != rating:* ]]; then
+    existing_rating="rating:general"
+fi
+if [[ -n "$existing_rating" && "$tag" != rating:* ]]; then
+    tag="$tag $existing_rating"
+fi
+
 mkdir -p "$config_dir"
 printf '%s\n' "$tag" > "$tags_file"
 
