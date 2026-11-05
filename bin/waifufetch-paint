@@ -3,11 +3,11 @@
 # Fast banner painter.
 #
 # The ONLY thing an opening terminal runs. The helper keeps paint.queue/
-# full of ready banners (image picked, kitty escape pre-rendered, tag rows
-# formatted); this script pops one, runs fastfetch once and cats the
-# prepared files. When the queue is empty it reuses the last painted banner
-# (instant, no network); if there is nothing at all it just runs fastfetch.
-# It never executes the full waifufetch pipeline.
+# full of ready banners; this script pops one, runs fastfetch once and cats
+# the prepared files. When the queue is empty it advances to the next
+# buffered image ON PRINT and paints it via the full path (~0.3-0.5 s, no
+# network), so every terminal shows a different picture even if the helper
+# is behind. It never shows a stale image.
 
 set -uo pipefail
 
@@ -15,15 +15,13 @@ log="${WAIFUFETCH_LOG:-$HOME/.cache/fastfetch/waifus/paint.log}"
 t0="$(date +%s%N 2>/dev/null || true)"
 cache="$HOME/.cache/fastfetch/waifus"
 queue="$cache/paint.queue"
-cur="$cache/paint.current"
 path="none"
 
 fallback() {
     exec fastfetch "$@"
 }
 
-# Nothing prepared at all: refresh the current image as blocks and show it,
-# so the user never stares at a stale pixelated logo.
+# Nothing prepared at all: refresh the current image as blocks and show it.
 fallback_fresh() {
     if [[ -x "$HOME/.local/bin/waifufetch" ]]; then
         "$HOME/.local/bin/waifufetch" --ensure-logo >/dev/null 2>&1 || true
@@ -47,52 +45,35 @@ if [[ -d "$queue" ]]; then
 fi
 
 if [[ -z "$state" || ! -r "$state" ]]; then
-    # Queue empty: repaint the previous banner, which is still on disk.
-    state="$cur/state"
-    path="last"
-    if [[ ! -s "$state" ]]; then
-        fallback_fresh "$@"
+    # Queue empty: advance on print. Promote the next buffered image and
+    # paint it right now through the full path.
+    if [[ -x "$HOME/.local/bin/waifufetch" ]]; then
+        exec "$HOME/.local/bin/waifufetch" "$@"
     fi
+    fallback_fresh "$@"
 else
     path="queue"
 fi
 
 IFS=$'\t' read -r ver image cols lines esc blank source tags_file source_file text_col pad_top hoffset < "$state" || fallback "$@"
 if [[ "$ver" != "v2" ]]; then
-    [[ "$path" == "queue" ]] && rm -f "$state"
+    rm -f "$state"
     fallback "$@"
 fi
-[[ -s "$image" && -s "$esc" && -s "$blank" && -s "$tags_file" && -s "$source_file" ]] || { [[ "$path" == "queue" ]] && rm -f "$state"; fallback "$@"; }
+[[ -s "$image" && -s "$esc" && -s "$blank" && -s "$tags_file" && -s "$source_file" ]] || { rm -f "$state"; fallback "$@"; }
 
-if [[ "$path" == "queue" ]]; then
-    # Materialize a copy so a future empty queue can repaint it instantly.
-    mkdir -p "$cur" 2>/dev/null || true
-    rm -f "$cur"/* 2>/dev/null
-    cp -f "$esc" "$cur/image.esc" 2>/dev/null || true
-    cp -f "$blank" "$cur/blank.txt" 2>/dev/null || true
-    cp -f "$tags_file" "$cur/tags.txt" 2>/dev/null || true
-    cp -f "$source_file" "$cur/source.txt" 2>/dev/null || true
-    printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$image" "$cols" "$lines" "$cur/image.esc" "$cur/blank.txt" "$source" \
-        "$cur/tags.txt" "$cur/source.txt" "$text_col" "$pad_top" "$hoffset" \
-        > "$cur/state" 2>/dev/null || true
-    rm -f "$state" "$tags_file" "$source_file" "$blank"
-    esc="$cur/image.esc"
-    blank="$cur/blank.txt"
-    tags_file="$cur/tags.txt"
-    source_file="$cur/source.txt"
-fi
-
-# Prepared for a wider terminal than this one? The box would wrap. Regenerate
-# the banner at the real size through the full path instead of showing a
-# stale block-art logo.
+# Prepared for a wider terminal than this one? Regenerate through the full
+# path instead of wrapping the box or showing a stale logo.
 tc_now="$(tput cols 2>/dev/null || printf '100')"
 if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( text_col + 37 > tc_now )); then
+    rm -f "$state"
     if [[ -x "$HOME/.local/bin/waifufetch" ]]; then
         exec "$HOME/.local/bin/waifufetch" "$@"
     fi
     fallback "$@"
 fi
+
+rm -f "$state" "$tags_file" "$source_file" "$blank"
 
 export FASTFETCH_WAIFU_SOURCE="$source"
 export FASTFETCH_WAIFU_TEXT_COLUMN="$text_col"
