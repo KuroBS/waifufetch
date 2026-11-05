@@ -503,7 +503,9 @@ logo_mode() {
     case "${mode:-auto}" in
         graphics | chafa | ansi) printf '%s\n' "$mode" ;;
         *)
-            if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitten >/dev/null 2>&1 && [[ -t 1 ]]; then
+            # NOTE: no [[ -t 1 ]] here - this runs in a command substitution
+            # where stdout is a pipe; the real tty check lives in the caller.
+            if [[ -n "${KITTY_WINDOW_ID:-}" ]]; then
                 printf 'graphics\n'
             else
                 printf 'ansi\n'
@@ -534,12 +536,25 @@ cell_pixels() {
     printf '%s %s\n' "$cw" "$ch"
 }
 
+# Left/top logo padding from config.jsonc, "<left> <top>".
+logo_padding() {
+    local left top
+
+    left="$(sed -nE 's/^[[:space:]]*"left"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" 2>/dev/null | head -n 1)"
+    top="$(sed -nE 's/^[[:space:]]*"top"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$CONFIG_DIR/config.jsonc" 2>/dev/null | head -n 1)"
+
+    printf '%s %s\n' "${left:-0}" "${top:-0}"
+}
+
 # Cell rectangle "<cols> <lines>" that keeps the image aspect inside the area
 # left free by the module box.
 graphics_geometry() {
-    local image="$1" maxc maxl iw ih cw ch x y
+    local image="$1" maxc maxl iw ih cw ch x y pad_left pad_top
 
     read -r maxc maxl < <(logo_geometry)
+    read -r pad_left pad_top < <(logo_padding)
+    maxl=$((maxl - pad_top))
+    ((maxl < 4)) && maxl=4
     read -r iw ih < <(magick identify -format '%w %h\n' "$image[0]" 2>/dev/null | head -n 1)
 
     if [[ "$iw" =~ ^[0-9]+$ && "$ih" =~ ^[0-9]+$ && "$iw" -gt 0 && "$ih" -gt 0 ]]; then
@@ -561,14 +576,40 @@ graphics_geometry() {
     printf '%s %s\n' "$x" "$y"
 }
 
+# Emit the kitty graphics-protocol escape that draws $1 scaled to $2 x $3
+# cells (C=1 keeps the cursor in place). We emit it ourselves on stdout so the
+# ordering with fastfetch is deterministic - kitten icat writes to /dev/tty
+# instead, which races with fastfetch's stdout.
+kitty_image_escape() {
+    local image="$1" cols="$2" lines="$3"
+
+    [[ -s "$image" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+
+    python3 - "$image" "$cols" "$lines" <<'PYEOF'
+import base64, sys
+img, c, r = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+data = base64.b64encode(open(img, "rb").read()).decode()
+esc = "\033"
+CH = 4096
+for i in range(0, len(data), CH):
+    chunk = data[i:i+CH]
+    more = 0 if i + CH >= len(data) else 1
+    if i == 0:
+        sys.stdout.write(f"{esc}_Ga=T,f=100,t=d,c={c},r={r},q=2,C=1,m={more};{chunk}{esc}\\")
+    else:
+        sys.stdout.write(f"{esc}_Gm={more};{chunk}{esc}\\")
+sys.stdout.flush()
+PYEOF
+}
+
 # Fastfetch layout with a blank logo area, then the real image drawn on top
 # with kitty's image protocol (full resolution, no block approximation).
 graphics_banner() {
     local image="$1"
-    local cols lines blank args lines_out rc
+    local cols lines blank args lines_out rc pad_left pad_top
 
-    command -v kitten >/dev/null 2>&1 || return 1
-
+    read -r pad_left pad_top < <(logo_padding)
     read -r cols lines < <(graphics_geometry "$image")
     blank="$CACHE_DIR/logo-blank.txt"
     mkdir -p "$CACHE_DIR" 2>/dev/null || true
@@ -585,15 +626,19 @@ graphics_banner() {
     fastfetch "${args[@]}" "${FASTFETCH_ARGS[@]}"
     rc=$?
 
+    # Top-left of the logo area (row 1 + padding).
     printf '\033[%dA\033[1G' "$lines_out"
-    if kitten icat --place "${cols}x${lines}@0x0" --scale-up=no --stdin=no "$image" >/dev/null 2>&1; then
-        printf '\033[%dB\033[1G' "$lines_out"
-        return "$rc"
+    if (( pad_top )); then printf '\033[%dB' "$pad_top"; fi
+    if (( pad_left )); then printf '\033[%dC' "$pad_left"; fi
+
+    if ! kitty_image_escape "$image" "$cols" "$lines"; then
+        printf '\033[%d;1H' "$((lines_out + 1))"
+        return 1
     fi
 
-    # Not a kitty graphics terminal after all: let the caller use the blocks.
-    printf '\033[%dB\033[1G' "$lines_out"
-    return 1
+    # Cursor just below the banner for the shell prompt.
+    printf '\033[%d;1H' "$((lines_out + 1))"
+    return "$rc"
 }
 
 # Print an image as ANSI art (history previews, slideshow, collage).
@@ -1693,6 +1738,12 @@ doctor() {
             printf '  geometria: %s (cols x lineas maximas para este terminal)\n' "$(logo_geometry)"
         else
             printf '  logo ANSI: FALLA (no se pudo generar)\n'
+        fi
+    elif [[ "$mode" == "graphics" ]]; then
+        if [[ -n "${KITTY_WINDOW_ID:-}" ]]; then
+            printf '  terminal kitty: OK (protocolo grafico disponible)\n'
+        else
+            printf '  terminal kitty: NO -> no se puede dibujar en pixeles\n'
         fi
     else
         if fastfetch --list-features 2>/dev/null | tr ' ' '\n' | grep -qx chafa; then

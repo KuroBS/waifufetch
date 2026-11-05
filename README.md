@@ -133,16 +133,22 @@ waifufetch --collage 12
 
 ```text
 LOGO_MODE=auto     # default: graphics inside kitty, ansi everywhere else
-LOGO_MODE=graphics # real pixels via kitty's image protocol (needs kitty+kitten)
+LOGO_MODE=graphics # real pixels via kitty's image protocol (kitty + python3)
 LOGO_MODE=ansi     # ImageMagick-rendered color blocks, works in any terminal
 LOGO_MODE=chafa    # only if the chafa package (libchafa.so) is installed
 ```
 
 **Full resolution needs a terminal with image support.** In kitty the picture is
-drawn by `kitten icat` next to the module box, at the native resolution the
-terminal can show (roughly cell size x logo size, ~430x490 px on a 100x30
-window - about 30x more pixels than the block art). alacritty has no image
-protocol at all, so there the blocks are the ceiling.
+drawn next to the module box at the native resolution the terminal can show
+(~500x500 px on a 100x30 window, about 30x more pixels than the block art).
+alacritty has no image protocol at all, so there the blocks are the ceiling.
+
+The kitty escape is emitted by the script itself (chunked
+`<ESC>_Ga=T,f=100,t=d,c=..,r=..,q=2,C=1,m=..;<base64>` on stdout, `python3` for
+the base64). It deliberately does not use `kitten icat`: that writes to
+`/dev/tty` while fastfetch writes to stdout, and the two streams race, which
+left the image drawn in the wrong place. Emitting it on stdout keeps the
+ordering with fastfetch deterministic.
 
 The block width follows `logo.width` in `~/.config/fastfetch/config.jsonc`
 (33 columns by default, which fits an 80-column terminal next to the modules).
