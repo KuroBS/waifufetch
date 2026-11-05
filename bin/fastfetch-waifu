@@ -941,6 +941,13 @@ prepare_next_banner() {
     image="$(choose_logo)"
     [[ -s "$image" ]] || return 1
 
+    # The width cap (room for the module box) is normally computed in the
+    # main flow; --prepare-next exits early, so apply it here too, otherwise
+    # a landscape picture fills the whole width and the banner wraps.
+    source="$(post_url_for_logo "$image")"
+    tags="$(tags_for_logo "$image")"
+    LOGO_MAX_COLS="$(tag_width_cap "$tags")"
+
     read -r cols lines < <(graphics_geometry "$image")
     read -r maxc _ < <(logo_geometry)
     hoffset=$(( pad_left + (maxc - cols) / 2 ))
@@ -956,8 +963,6 @@ prepare_next_banner() {
     kitty_image_escape_cached "$image" "$cols" "$lines" >/dev/null 2>&1 || return 1
 
     text_col="$(text_column_for_width "$cols")"
-    source="$(post_url_for_logo "$image")"
-    tags="$(tags_for_logo "$image")"
 
     # Tags carry newlines, so they cannot live in the single-line state file:
     # pre-format them into per-entry files the painter copies into place.

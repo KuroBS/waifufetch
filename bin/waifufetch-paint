@@ -22,6 +22,15 @@ fallback() {
     exec fastfetch "$@"
 }
 
+# Nothing prepared at all: refresh the current image as blocks and show it,
+# so the user never stares at a stale pixelated logo.
+fallback_fresh() {
+    if [[ -x "$HOME/.local/bin/waifufetch" ]]; then
+        "$HOME/.local/bin/waifufetch" --ensure-logo >/dev/null 2>&1 || true
+    fi
+    exec fastfetch "$@"
+}
+
 # Only paint prepared kitty banners where they can be shown. Any other
 # terminal (or a LOGO_MODE that is not graphics) just runs fastfetch.
 logo_conf="$(sed -nE 's/^[[:space:]]*LOGO_MODE[[:space:]]*=[[:space:]]*["'\'']?([a-z]+)["'\'']?.*/\1/p' "$HOME/.config/fastfetch/waifufetch-source.conf" 2>/dev/null | tail -n 1)"
@@ -42,7 +51,7 @@ if [[ -z "$state" || ! -r "$state" ]]; then
     state="$cur/state"
     path="last"
     if [[ ! -s "$state" ]]; then
-        fallback "$@"
+        fallback_fresh "$@"
     fi
 else
     path="queue"
@@ -74,9 +83,14 @@ if [[ "$path" == "queue" ]]; then
     source_file="$cur/source.txt"
 fi
 
-# Prepared for a wider terminal than this one? The box would wrap.
+# Prepared for a wider terminal than this one? The box would wrap. Regenerate
+# the banner at the real size through the full path instead of showing a
+# stale block-art logo.
 tc_now="$(tput cols 2>/dev/null || printf '100')"
 if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( text_col + 37 > tc_now )); then
+    if [[ -x "$HOME/.local/bin/waifufetch" ]]; then
+        exec "$HOME/.local/bin/waifufetch" "$@"
+    fi
     fallback "$@"
 fi
 
