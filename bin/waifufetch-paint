@@ -2,32 +2,29 @@
 
 # Fast banner painter.
 #
-# Everything expensive (downloading, choosing the image, rendering the kitty
-# escape) is done ahead of time by waifufetch-helper, which parks a ready
-# banner in ~/.cache/fastfetch/waifus/paint.queue/. This script only runs
-# fastfetch and cats the prepared files, so opening a terminal stays quick.
-#
-# When the queue is empty it falls back to the full waifufetch path.
+# The ONLY thing an opening terminal runs. The helper keeps paint.queue/
+# full of ready banners (image picked, kitty escape pre-rendered, tag rows
+# formatted); this script pops one, runs fastfetch once and cats the
+# prepared files. When the queue is empty it reuses the last painted banner
+# (instant, no network); if there is nothing at all it just runs fastfetch.
+# It never executes the full waifufetch pipeline.
 
 set -uo pipefail
 
 log="${WAIFUFETCH_LOG:-$HOME/.cache/fastfetch/waifus/paint.log}"
 t0="$(date +%s%N 2>/dev/null || true)"
-
 cache="$HOME/.cache/fastfetch/waifus"
 queue="$cache/paint.queue"
-waifu="$HOME/.local/bin/waifufetch"
+cur="$cache/paint.current"
+path="none"
 
 fallback() {
-    exec "$waifu" "$@"
+    exec fastfetch "$@"
 }
 
-# Only paint prepared kitty banners where they can actually be shown. Any
-# other terminal (or a LOGO_MODE that is not graphics) uses the full path.
-logo_conf="${LOGO_MODE_CONF:-}"
-if [[ -z "$logo_conf" ]]; then
-    logo_conf="$(sed -nE 's/^[[:space:]]*LOGO_MODE[[:space:]]*=[[:space:]]*["'\'']?([a-z]+)["'\'']?.*/\1/p' "$HOME/.config/fastfetch/waifufetch-source.conf" 2>/dev/null | tail -n 1)"
-fi
+# Only paint prepared kitty banners where they can be shown. Any other
+# terminal (or a LOGO_MODE that is not graphics) just runs fastfetch.
+logo_conf="$(sed -nE 's/^[[:space:]]*LOGO_MODE[[:space:]]*=[[:space:]]*["'\'']?([a-z]+)["'\'']?.*/\1/p' "$HOME/.config/fastfetch/waifufetch-source.conf" 2>/dev/null | tail -n 1)"
 case "${logo_conf:-auto}" in
     ansi | chafa) fallback "$@" ;;
 esac
@@ -40,32 +37,56 @@ if [[ -d "$queue" ]]; then
     state="$(find "$queue" -maxdepth 1 -type f -name '*.state' 2>/dev/null | sort | head -n 1)"
 fi
 
-[[ -n "$state" && -r "$state" ]] || fallback "$@"
-
-IFS=$'\t' read -r ver image cols lines esc blank source tags_file source_file text_col pad_top hoffset < "$state" || fallback "$@"
-[[ "$ver" == "v2" ]] || { rm -f "$state"; fallback "$@"; }
-[[ -s "$image" && -s "$esc" && -s "$blank" && -s "$tags_file" && -s "$source_file" ]] || { rm -f "$state"; fallback "$@"; }
-
-# Prepared for a wider terminal than this one? The box would wrap: recompute
-# everything through the full path instead.
-tc_now="$(tput cols 2>/dev/null || printf '100')"
-if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( text_col + 37 > tc_now )); then
-    rm -f "$state"
-    fallback "$@"
+if [[ -z "$state" || ! -r "$state" ]]; then
+    # Queue empty: repaint the previous banner, which is still on disk.
+    state="$cur/state"
+    path="last"
+    if [[ ! -s "$state" ]]; then
+        fallback "$@"
+    fi
+else
+    path="queue"
 fi
 
-# Consume it so the next terminal shows a different picture.
-rm -f "$state"
+IFS=$'\t' read -r ver image cols lines esc blank source tags_file source_file text_col pad_top hoffset < "$state" || fallback "$@"
+if [[ "$ver" != "v2" ]]; then
+    [[ "$path" == "queue" ]] && rm -f "$state"
+    fallback "$@"
+fi
+[[ -s "$image" && -s "$esc" && -s "$blank" && -s "$tags_file" && -s "$source_file" ]] || { [[ "$path" == "queue" ]] && rm -f "$state"; fallback "$@"; }
+
+if [[ "$path" == "queue" ]]; then
+    # Materialize a copy so a future empty queue can repaint it instantly.
+    mkdir -p "$cur" 2>/dev/null || true
+    rm -f "$cur"/* 2>/dev/null
+    cp -f "$esc" "$cur/image.esc" 2>/dev/null || true
+    cp -f "$blank" "$cur/blank.txt" 2>/dev/null || true
+    cp -f "$tags_file" "$cur/tags.txt" 2>/dev/null || true
+    cp -f "$source_file" "$cur/source.txt" 2>/dev/null || true
+    printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$image" "$cols" "$lines" "$cur/image.esc" "$cur/blank.txt" "$source" \
+        "$cur/tags.txt" "$cur/source.txt" "$text_col" "$pad_top" "$hoffset" \
+        > "$cur/state" 2>/dev/null || true
+    rm -f "$state" "$tags_file" "$source_file" "$blank"
+    esc="$cur/image.esc"
+    blank="$cur/blank.txt"
+    tags_file="$cur/tags.txt"
+    source_file="$cur/source.txt"
+fi
+
+# Prepared for a wider terminal than this one? The box would wrap.
+tc_now="$(tput cols 2>/dev/null || printf '100')"
+if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( text_col + 37 > tc_now )); then
+    fallback "$@"
+fi
 
 export FASTFETCH_WAIFU_SOURCE="$source"
 export FASTFETCH_WAIFU_TEXT_COLUMN="$text_col"
 
-# Put this banner's pre-formatted rows where the fastfetch config cats them.
-banner="$HOME/.cache/fastfetch/waifus/banner"
+banner="$cache/banner"
 mkdir -p "$banner" 2>/dev/null || true
 cp -f "$tags_file" "$banner/tags.txt" 2>/dev/null || true
 cp -f "$source_file" "$banner/source.txt" 2>/dev/null || true
-rm -f "$tags_file" "$source_file"
 
 out="$(mktemp --tmpdir="$cache" paint.XXXXXX 2>/dev/null)" || fallback "$@"
 
@@ -75,9 +96,8 @@ rc=$?
 lines_out="$(wc -l < "$out" 2>/dev/null || printf '0')"
 [[ "$lines_out" =~ ^[0-9]+$ && "$lines_out" -gt 0 ]] || lines_out="$lines"
 cat "$out" 2>/dev/null
-rm -f "$out" "$blank"
+rm -f "$out"
 
-# Back to the top-left of the logo area and print the prepared escape.
 printf '\033[%dA\033[1G' "$lines_out"
 if [[ "${pad_top:-0}" =~ ^[0-9]+$ ]] && (( pad_top > 0 )); then
     printf '\033[%dB' "$pad_top"
@@ -91,9 +111,8 @@ printf '\033[%d;1H' "$((lines_out + 1))"
 if [[ -n "$t0" ]]; then
     t1="$(date +%s%N 2>/dev/null || true)"
     if [[ -n "$t1" ]]; then
-        path_taken="queue"
-        [[ -z "$state" ]] && path_taken="fallback"
-        printf '%s %s path=%s ms=%s\n' "$(date +%H:%M:%S)" "$$" "$path_taken" "$(( (t1 - t0) / 1000000 ))" >> "$log" 2>/dev/null || true
+        printf '%s path=%s ms=%s\n' "$(date +%H:%M:%S)" "$path" "$(( (t1 - t0) / 1000000 ))" >> "$log" 2>/dev/null || true
     fi
 fi
+
 exit "$rc"

@@ -1,40 +1,15 @@
 #!/usr/bin/env bash
 
-# Greeting wrapper: draws the banner as fast as possible.
-#
-# Inside kitty the picture is drawn with the kitty protocol; waifufetch reads
-# the escape from the cache the background helper prepares, so an open is
-# basically fastfetch plus a cat. Outside kitty it falls back to the ANSI
-# blocks (or whatever LOGO_MODE says).
-#
-# The helper is started (detached) so the next open is already prepared.
+# Greeting wrapper: the ONLY thing an opening terminal runs is the fast
+# painter. The helper (buffer + ready banners) is started once per session
+# from the compositor autostart, never from here.
 
 set -uo pipefail
 
-waifu="$HOME/.local/bin/waifufetch"
 paint="$HOME/.local/bin/waifufetch-paint"
-helper="$HOME/.local/bin/waifufetch-helper"
-
-# Start the background helper once; it is a no-op when it is already running.
-# Double-fork so the helper is reparented to init and its downloads/render
-# work is never accounted as part of this shell's job (fish's `time` used to
-# include the helper's first pass).
-if [[ -x "$helper" ]]; then
-    (
-        if command -v setsid >/dev/null 2>&1; then
-            setsid "$helper" >/dev/null 2>&1 </dev/null &
-        else
-            nohup "$helper" >/dev/null 2>&1 </dev/null &
-        fi
-    ) 2>/dev/null &
-fi
-
-if [[ ! -x "$waifu" ]]; then
-    exec fastfetch "$@"
-fi
 
 if [[ -x "$paint" ]]; then
     exec "$paint" "$@"
 fi
 
-exec "$waifu" "$@"
+exec fastfetch "$@"

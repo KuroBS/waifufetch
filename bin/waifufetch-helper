@@ -50,6 +50,8 @@ while :; do
             sleep 1
             continue
         fi
+        # Keep the ANSI fallback (alacritty and friends) fresh too.
+        "$waifu" --ensure-logo >/dev/null 2>&1 || true
         WAIFUFETCH_FILL_LIMIT=1 "$waifu" --prefetch-buffer >/dev/null 2>&1 || true
     fi
     sleep 8
