@@ -625,7 +625,21 @@ graphics_geometry() {
     read -r pad_left pad_top _ < <(logo_padding)
     maxl=$((maxl - pad_top))
     ((maxl < 4)) && maxl=4
-    read -r iw ih < <(magick identify -format '%w %h\n' "$image[0]" 2>/dev/null | head -n 1)
+
+    # Image dimensions are cached next to the image: spawning ImageMagick on
+    # every terminal open costs ~40ms and they never change.
+    local dim_file="${image%.*}.dim"
+    iw=""
+    ih=""
+    if [[ -s "$dim_file" ]]; then
+        read -r iw ih < "$dim_file"
+    fi
+    if [[ ! "$iw" =~ ^[0-9]+$ || ! "$ih" =~ ^[0-9]+$ ]]; then
+        read -r iw ih < <(magick identify -format '%w %h\n' "$image[0]" 2>/dev/null | head -n 1)
+        if [[ "$iw" =~ ^[0-9]+$ && "$ih" =~ ^[0-9]+$ ]]; then
+            printf '%s %s\n' "$iw" "$ih" > "$dim_file" 2>/dev/null || true
+        fi
+    fi
 
     if [[ "$iw" =~ ^[0-9]+$ && "$ih" =~ ^[0-9]+$ && "$iw" -gt 0 && "$ih" -gt 0 ]]; then
         read -r cw ch < <(cell_pixels)
@@ -726,6 +740,25 @@ kitty_image_escape_cached() {
     return 1
 }
 
+# Keep the buffer at its configured size, dropping the newest surplus so the
+# rotation order (oldest first) is preserved.
+prune_buffer() {
+    local count
+
+    [[ -d "$BUFFER_DIR" ]] || return 0
+    count="$(find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)"
+    count="${count:-0}"
+    (( count > BUFFER_SIZE )) || return 0
+
+    find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' -printf '%T@ %p\n' 2>/dev/null \
+        | sort -n \
+        | tail -n +$((BUFFER_SIZE + 1)) \
+        | cut -d' ' -f2- \
+        | while IFS= read -r extra; do
+            rm -f "$extra" "${extra%.*}.url" "${extra%.*}.tags" "${extra%.*}.dim"
+        done
+}
+
 oldest_buffer_image() {
     find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' -printf '%T@ %p\n' 2>/dev/null \
         | sort -n | head -n 1 | cut -d' ' -f2-
@@ -743,6 +776,7 @@ prefetch_escape_async() {
         fi
         ls -1t "$KCACHE_DIR"/*.esc 2>/dev/null | tail -n +41 | xargs -r rm -f 2>/dev/null || true
     ) >/dev/null 2>&1 &
+    renice -n 10 -p "$!" >/dev/null 2>&1 || true
 }
 
 # Fastfetch layout with a blank logo area, then the real image drawn on top
@@ -1036,25 +1070,35 @@ ensure_logo_image() {
 }
 
 fill_buffer() {
-    local count output url_output
+    local count output url_output failures=0 attempts=0
 
     mkdir -p "$BUFFER_DIR"
     count="$(buffer_count)"
     count="${count:-0}"
 
-    while [[ "$count" -lt "$BUFFER_SIZE" ]]; do
+    # A single failed download used to abort the whole refill, which left the
+    # buffer empty for the next terminal. Retry a few times instead, and
+    # recount every round so two concurrent fills cannot overshoot the size.
+    while [[ "$failures" -lt 3 && "$attempts" -lt $((BUFFER_SIZE * 3)) ]]; do
+        count="$(find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)"
+        count="${count:-0}"
+        [[ "$count" -lt "$BUFFER_SIZE" ]] || break
+        attempts=$((attempts + 1))
+
         output="$BUFFER_DIR/waifu-$(date +%s%N).png"
         url_output="${output%.*}.url"
 
         if ! download_waifu "$output" "$url_output"; then
             rm -f "$output" "$url_output"
-            return 1
+            failures=$((failures + 1))
+            continue
         fi
 
-        count=$((count + 1))
+        failures=0
     done
 
     mark_active_tags
+    return 0
 }
 
 promote_file_as_current() {
@@ -1113,6 +1157,8 @@ refresh_buffer_async() {
         flock -n "$lock_fd" || exit 0
         fill_buffer
     ) >/dev/null 2>&1 &
+    # Downloads must not compete with the terminal opening in the foreground.
+    renice -n 10 -p "$!" >/dev/null 2>&1 || true
     exec {lock_fd}>&-
 }
 
@@ -2208,6 +2254,7 @@ if [[ ! -s "$CURRENT_IMAGE" && "$FORCED_REFRESH" -eq 1 ]]; then
 fi
 
 if [[ "$FORCED_REFRESH" -eq 0 ]]; then
+    prune_buffer
     FASTFETCH_WAIFU_BUFFER="$(buffer_count)/$BUFFER_SIZE"
     if [[ "$SHOW_SLIDESHOW" -eq 0 && "$SHOW_COLLAGE" -eq 0 ]]; then
         promote_buffer_image >/dev/null 2>&1 || true
