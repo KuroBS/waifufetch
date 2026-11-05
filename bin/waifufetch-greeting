@@ -1,37 +1,35 @@
 #!/usr/bin/env bash
 
-# Greeting wrapper: makes sure fastfetch has a logo to show.
+# Greeting wrapper: draws the banner as fast as possible.
 #
-# fastfetch only draws image logos when libchafa.so is installed; otherwise it
-# silently prints the distro ASCII logo. This fork pre-renders the picture as
-# truecolor ANSI blocks (logo.ansi) and fastfetch prints that file verbatim,
-# so the greeting always shows the waifu.
+# Inside kitty the picture is drawn with the kitty protocol; waifufetch reads
+# the escape from the cache the background helper prepares, so an open is
+# basically fastfetch plus a cat. Outside kitty it falls back to the ANSI
+# blocks (or whatever LOGO_MODE says).
 #
-# It never blocks the shell for long: regenerating the blocks takes ~0.3s and
-# if there is no image at all it refills the cache in the background.
+# The helper is started (detached) so the next open is already prepared.
 
 set -uo pipefail
 
-cache_dir="$HOME/.cache/fastfetch/waifus"
-logo="$cache_dir/logo.ansi"
-current="$cache_dir/current.png"
 waifu="$HOME/.local/bin/waifufetch"
+paint="$HOME/.local/bin/waifufetch-paint"
+helper="$HOME/.local/bin/waifufetch-helper"
 
-if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitten >/dev/null 2>&1; then
-    # Inside kitty the image is drawn at full resolution by waifufetch itself.
-    exec "$waifu"
-fi
-
-if [[ -x "$waifu" ]]; then
-    # --ensure-logo is cheap (0.07s) when nothing changed and knows how to
-    # spot a new image or a resized terminal on its own.
-    "$waifu" --ensure-logo >/dev/null 2>&1 || true
-
-    if [[ ! -s "$logo" ]]; then
-        # Nothing cached yet: fill the cache for the next terminal.
-        mkdir -p "$cache_dir" 2>/dev/null || true
-        nohup "$waifu" >/dev/null 2>&1 &
+# Start the background helper once; it is a no-op when it is already running.
+if [[ -x "$helper" ]]; then
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$helper" >/dev/null 2>&1 </dev/null &
+    else
+        nohup "$helper" >/dev/null 2>&1 </dev/null &
     fi
 fi
 
-exec fastfetch "$@"
+if [[ ! -x "$waifu" ]]; then
+    exec fastfetch "$@"
+fi
+
+if [[ -x "$paint" ]]; then
+    exec "$paint" "$@"
+fi
+
+exec "$waifu" "$@"

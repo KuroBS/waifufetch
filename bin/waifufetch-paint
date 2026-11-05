@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+
+# Fast banner painter.
+#
+# Everything expensive (downloading, choosing the image, rendering the kitty
+# escape) is done ahead of time by waifufetch-helper, which parks a ready
+# banner in ~/.cache/fastfetch/waifus/paint.queue/. This script only runs
+# fastfetch and cats the prepared files, so opening a terminal stays quick.
+#
+# When the queue is empty it falls back to the full waifufetch path.
+
+set -uo pipefail
+
+cache="$HOME/.cache/fastfetch/waifus"
+queue="$cache/paint.queue"
+waifu="$HOME/.local/bin/waifufetch"
+
+fallback() {
+    exec "$waifu" "$@"
+}
+
+# Only paint prepared kitty banners where they can actually be shown. Any
+# other terminal (or a LOGO_MODE that is not graphics) uses the full path.
+logo_conf="${LOGO_MODE_CONF:-}"
+if [[ -z "$logo_conf" ]]; then
+    logo_conf="$(sed -nE 's/^[[:space:]]*LOGO_MODE[[:space:]]*=[[:space:]]*["'\'']?([a-z]+)["'\'']?.*/\1/p' "$HOME/.config/fastfetch/waifufetch-source.conf" 2>/dev/null | tail -n 1)"
+fi
+case "${logo_conf:-auto}" in
+    ansi | chafa) fallback "$@" ;;
+esac
+if [[ -z "${KITTY_WINDOW_ID:-}" ]]; then
+    fallback "$@"
+fi
+
+state=""
+if [[ -d "$queue" ]]; then
+    state="$(find "$queue" -maxdepth 1 -type f -name '*.state' 2>/dev/null | sort | head -n 1)"
+fi
+
+[[ -n "$state" && -r "$state" ]] || fallback "$@"
+
+IFS=$'\t' read -r image cols lines esc blank source tags text_col pad_top hoffset < "$state" || fallback "$@"
+[[ -s "$image" && -s "$esc" && -s "$blank" ]] || { rm -f "$state"; fallback "$@"; }
+
+# Consume it so the next terminal shows a different picture.
+rm -f "$state"
+
+export FASTFETCH_WAIFU_SOURCE="$source"
+export FASTFETCH_WAIFU_TAGS="$tags"
+export FASTFETCH_WAIFU_TEXT_COLUMN="$text_col"
+
+out="$(mktemp --tmpdir="$cache" paint.XXXXXX 2>/dev/null)" || fallback "$@"
+
+printf '\033[2J\033[H'
+fastfetch --logo "$blank" --logo-type file-raw >"$out" 2>/dev/null
+rc=$?
+lines_out="$(wc -l < "$out" 2>/dev/null || printf '0')"
+[[ "$lines_out" =~ ^[0-9]+$ && "$lines_out" -gt 0 ]] || lines_out="$lines"
+cat "$out" 2>/dev/null
+rm -f "$out"
+
+# Back to the top-left of the logo area and print the prepared escape.
+printf '\033[%dA\033[1G' "$lines_out"
+if [[ "${pad_top:-0}" =~ ^[0-9]+$ ]] && (( pad_top > 0 )); then
+    printf '\033[%dB' "$pad_top"
+fi
+if [[ "${hoffset:-0}" =~ ^[0-9]+$ ]] && (( hoffset > 0 )); then
+    printf '\033[%dC' "$hoffset"
+fi
+cat "$esc" 2>/dev/null || true
+printf '\033[%d;1H' "$((lines_out + 1))"
+
+exit "$rc"

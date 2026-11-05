@@ -143,6 +143,23 @@ drawn next to the module box at the native resolution the terminal can show
 (~500x500 px on a 100x30 window, about 30x more pixels than the block art).
 alacritty has no image protocol at all, so there the blocks are the ceiling.
 
+### Startup cost (helper + painter)
+
+Opening a terminal is split into a background helper and a fast painter:
+
+- **`waifufetch-helper`** (background, started by the greeting): keeps the
+  buffer full and parks 3 ready banners in
+  `~/.cache/fastfetch/waifus/paint.queue/`. Each ready banner has the image
+  picked, the kitty escape pre-rendered, the blank logo and the tag rows
+  resolved - everything the painter needs.
+- **`waifufetch-paint`** (what the greeting actually runs in kitty): pops one
+  ready banner, runs fastfetch and cats two files. Measured at ~0.2 s instead
+  of ~1.5-2 s. When the queue is empty it falls back to the full `waifufetch`.
+- Manual commands (`waifufetch`, `--slideshow`, ...) keep working unchanged.
+
+Both the helper and its downloads run at `nice +10`, so they never compete
+with the terminal opening.
+
 ### Startup cost
 
 Opening a terminal should feel instant, so the heavy work is cached or moved

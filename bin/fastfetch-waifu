@@ -19,6 +19,9 @@ LOGO_IMAGE="$CACHE_DIR/logo.png"
 LOGO_ANSI="$CACHE_DIR/logo.ansi"
 LOGO_META="$CACHE_DIR/logo.meta"
 KCACHE_DIR="$CACHE_DIR/kcache"
+LAST_SIZE_FILE="$CACHE_DIR/last-size"
+HELPER_LOCK="$CACHE_DIR/helper.lock"
+PAINT_QUEUE="$CACHE_DIR/paint.queue"
 FALLBACK_IMAGE="$HOME/.config/ml4w/assets/ml4w.png"
 API_URL="https://danbooru.donmai.us/posts.json"
 GELBOORU_API_URL="https://gelbooru.com/index.php"
@@ -70,6 +73,11 @@ Waifu options:
   --buffer-count       Muestra cuantas imagenes hay en el buffer
   --doctor             Diagnostico: terminal, config, logo y cache
   --ensure-logo        Genera el logo (ANSI) desde la imagen actual y sale
+  --prepare-escapes    Pre-genera los escapes de las siguientes imagenes
+  --prepare-next       Prepara un banner completo para el pintor rapido
+  --helper-start       Arranca el helper de fondo (buffer + escapes)
+  --helper-stop        Para el helper de fondo
+  --helper-status      Dice si el helper esta corriendo
   --image-tags         Muestra artist, copyright y characters de la imagen actual
   --image-tags-fastfetch
                        Muestra tags con filas extra alineadas para fastfetch
@@ -553,6 +561,11 @@ logo_geometry() {
 logo_mode() {
     local mode
 
+    if [[ -n "${WAIFUFETCH_LOGO_MODE:-}" ]]; then
+        printf '%s\n' "$WAIFUFETCH_LOGO_MODE"
+        return 0
+    fi
+
     mode="$(sed -nE 's/^[[:space:]]*LOGO_MODE[[:space:]]*=[[:space:]]*["'\'']?([a-z]+)["'\'']?.*/\1/p' "$SOURCE_FILE" 2>/dev/null | tail -n 1)"
 
     case "${mode:-auto}" in
@@ -635,7 +648,9 @@ graphics_geometry() {
         read -r iw ih < "$dim_file"
     fi
     if [[ ! "$iw" =~ ^[0-9]+$ || ! "$ih" =~ ^[0-9]+$ ]]; then
-        read -r iw ih < <(magick identify -format '%w %h\n' "$image[0]" 2>/dev/null | head -n 1)
+        # A corrupt download makes identify fail; read then fails too and
+        # set -e would abort the whole run.
+        read -r iw ih < <(magick identify -format '%w %h\n' "$image[0]" 2>/dev/null | head -n 1) || true
         if [[ "$iw" =~ ^[0-9]+$ && "$ih" =~ ^[0-9]+$ ]]; then
             printf '%s %s\n' "$iw" "$ih" > "$dim_file" 2>/dev/null || true
         fi
@@ -832,6 +847,123 @@ graphics_banner() {
 }
 
 # Print an image as ANSI art (history previews, slideshow, collage).
+record_terminal_size() {
+    local cols lines
+
+    [[ -t 1 ]] || return 0
+    read -r cols lines < <(terminal_cells 2>/dev/null || true)
+    [[ "$cols" =~ ^[0-9]+$ && "$lines" =~ ^[0-9]+$ ]] || return 0
+    mkdir -p "$CACHE_DIR" 2>/dev/null || true
+    printf '%s %s\n' "$cols" "$lines" > "$LAST_SIZE_FILE" 2>/dev/null || true
+}
+
+# Pre-render the escapes for the next buffered images, using the geometry of
+# the last real terminal. This is what makes opening a terminal a plain cat.
+prepare_escapes() {
+    local limit="${1:-8}" img cols lines prepared=0
+
+    [[ -d "$BUFFER_DIR" ]] || return 0
+    [[ "$(logo_mode)" == "graphics" ]] || return 0
+    mkdir -p "$KCACHE_DIR" 2>/dev/null || true
+
+    while IFS= read -r img; do
+        [[ -s "$img" ]] || continue
+        if (( prepared >= limit )); then
+            break
+        fi
+        read -r cols lines < <(graphics_geometry "$img")
+        kitty_image_escape_cached "$img" "$cols" "$lines" >/dev/null 2>&1 || true
+        prepared=$((prepared + 1))
+    done < <(
+        find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' -printf '%T@ %p\n' 2>/dev/null \
+            | sort -n | cut -d' ' -f2- || true
+    )
+
+    ls -1t "$KCACHE_DIR"/*.esc 2>/dev/null | tail -n +41 | xargs -r rm -f 2>/dev/null || true
+    return 0
+}
+
+# Prepare everything the fast painter needs for one banner and park it in the
+# queue: the image, its pre-rendered escape, the blank logo and the env the
+# tag rows need. The painter then only runs fastfetch and cats files.
+prepare_next_banner() {
+    local image cols lines blank escf source tags text_col pad_left pad_top pad_right maxc hoffset n
+
+    read -r pad_left pad_top pad_right < <(logo_padding)
+    [[ "$(logo_mode)" == "graphics" ]] || return 1
+
+    mkdir -p "$PAINT_QUEUE" 2>/dev/null || true
+    n="$(ls -1 "$PAINT_QUEUE"/*.state 2>/dev/null | wc -l)"
+    n="${n:-0}"
+    (( n >= 3 )) && return 0
+
+    # Another image, if there is one buffered; keep the current otherwise.
+    promote_buffer_image >/dev/null 2>&1 || true
+    image="$(choose_logo)"
+    [[ -s "$image" ]] || return 1
+
+    read -r cols lines < <(graphics_geometry "$image")
+    read -r maxc _ < <(logo_geometry)
+    hoffset=$(( pad_left + (maxc - cols) / 2 ))
+    (( hoffset < pad_left )) && hoffset="$pad_left"
+
+    blank="$CACHE_DIR/paint-blank.txt"
+    awk -v n="$lines" -v w="$cols" 'BEGIN { s = ""; for (i = 0; i < w; i++) s = s " "; for (j = 0; j < n; j++) print s }' > "$blank" 2>/dev/null || return 1
+
+    escf="$(escape_cache_file "$image" "$cols" "$lines")"
+    kitty_image_escape_cached "$image" "$cols" "$lines" >/dev/null 2>&1 || return 1
+
+    text_col="$(text_column_for_width "$cols")"
+    source="$(post_url_for_logo "$image")"
+    tags="$(tags_for_logo "$image")"
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$image" "$cols" "$lines" "$escf" "$blank" "$source" "$tags" \
+        "$text_col" "$pad_top" "$hoffset" \
+        > "$PAINT_QUEUE/$(date +%s%N).state" 2>/dev/null || return 1
+
+    return 0
+}
+
+helper_running() {
+    [[ -e "$HELPER_LOCK" ]] || return 1
+    { exec 7>>"$HELPER_LOCK"; } 2>/dev/null || return 1
+    if flock -n 7; then
+        exec 7>&-
+        return 1
+    fi
+    exec 7>&-
+    return 0
+}
+
+start_helper() {
+    local helper="$HOME/.local/bin/waifufetch-helper"
+
+    command -v helper >/dev/null 2>&1 || true
+    [[ -x "$helper" ]] || return 0
+    helper_running && return 0
+
+    # setsid detaches it from our session so it survives the shell closing.
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$helper" >/dev/null 2>&1 </dev/null &
+    else
+        nohup "$helper" >/dev/null 2>&1 </dev/null &
+    fi
+    disown 2>/dev/null || true
+    return 0
+}
+
+stop_helper() {
+    local pid
+    [[ -e "$HELPER_LOCK" ]] || return 0
+    pid="$(cat "$HELPER_LOCK.pid" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && grep -qa waifufetch-helper "/proc/$pid/cmdline" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$HELPER_LOCK.pid"
+    return 0
+}
+
 show_ansi_image() {
     local image="$1"
     local width="${2:-}"
@@ -1070,9 +1202,18 @@ ensure_logo_image() {
 }
 
 fill_buffer() {
-    local count output url_output failures=0 attempts=0
+    local count output url_output failures=0 attempts=0 filled=0 lock_fd
+    local fill_limit="${WAIFUFETCH_FILL_LIMIT:-0}"
+    [[ "$fill_limit" =~ ^[0-9]+$ ]] || fill_limit=0
 
     mkdir -p "$BUFFER_DIR"
+
+    # The helper and the async refresh can overlap; one fill at a time.
+    { exec {lock_fd}>"$CACHE_DIR/fill.lock"; } 2>/dev/null || return 0
+    if ! flock -w 5 "$lock_fd" 2>/dev/null; then
+        exec {lock_fd}>&-
+        return 0
+    fi
     count="$(buffer_count)"
     count="${count:-0}"
 
@@ -1095,9 +1236,14 @@ fill_buffer() {
         fi
 
         failures=0
+        filled=$((filled + 1))
+        if (( fill_limit > 0 && filled >= fill_limit )); then
+            break
+        fi
     done
 
     mark_active_tags
+    exec {lock_fd}>&-
     return 0
 }
 
@@ -1686,6 +1832,17 @@ run_slideshow() {
 terminal_cells() {
     local cols lines
 
+    # Outside a terminal (background helper) there is no size to query: reuse
+    # the last one a real terminal reported, so the helper pre-renders the
+    # escapes for the geometry that will actually be used.
+    if [[ ! -t 1 && -s "$LAST_SIZE_FILE" ]]; then
+        read -r cols lines < "$LAST_SIZE_FILE"
+        if [[ "$cols" =~ ^[0-9]+$ && "$cols" -gt 0 && "$lines" =~ ^[0-9]+$ && "$lines" -gt 0 ]]; then
+            printf '%s %s\n' "$cols" "$lines"
+            return 0
+        fi
+    fi
+
     cols="$(tput cols 2>/dev/null || printf '80')"
     lines="$(tput lines 2>/dev/null || printf '24')"
 
@@ -2012,6 +2169,9 @@ PRINT_IMAGE_TAGS_FASTFETCH=0
 OPEN_SOURCE=0
 DOCTOR=0
 ENSURE_LOGO=0
+PREPARE_ESCAPES=0
+PREPARE_NEXT=0
+HELPER_ACTION=""
 SHOW_HISTORY=0
 HISTORY_LIMIT=10
 TAGS_CHANGED=0
@@ -2097,6 +2257,30 @@ while [[ $# -gt 0 ]]; do
             ;;
         --ensure-logo)
             ENSURE_LOGO=1
+            shift
+            ;;
+        --prepare-next)
+            PREPARE_NEXT=1
+            shift
+            ;;
+        --prepare-escapes)
+            PREPARE_ESCAPES=1
+            shift
+            if [[ -n "${1:-}" && "$1" =~ ^[0-9]+$ ]]; then
+                PREPARE_ESCAPES="$1"
+                shift
+            fi
+            ;;
+        --helper-start)
+            HELPER_ACTION=start
+            shift
+            ;;
+        --helper-stop)
+            HELPER_ACTION=stop
+            shift
+            ;;
+        --helper-status)
+            HELPER_ACTION=status
             shift
             ;;
         --open-source)
@@ -2192,6 +2376,31 @@ if [[ "$PRINT_IMAGE_TAGS_FASTFETCH" -eq 1 ]]; then
     exit 0
 fi
 
+if [[ "$HELPER_ACTION" == "start" ]]; then
+    start_helper
+    exit 0
+fi
+
+if [[ "$HELPER_ACTION" == "stop" ]]; then
+    stop_helper
+    exit 0
+fi
+
+if [[ "$HELPER_ACTION" == "status" ]]; then
+    if helper_running; then printf 'helper: corriendo\n'; else printf 'helper: parado\n'; fi
+    exit 0
+fi
+
+if [[ "$PREPARE_NEXT" -eq 1 ]]; then
+    prepare_next_banner || exit 1
+    exit 0
+fi
+
+if [[ "$PREPARE_ESCAPES" != "0" ]]; then
+    prepare_escapes "$PREPARE_ESCAPES"
+    exit 0
+fi
+
 if [[ "$ENSURE_LOGO" -eq 1 ]]; then
     ensure_logo_image || true
     exit 0
@@ -2268,6 +2477,7 @@ if [[ "$SHOW_SLIDESHOW" -eq 1 ]]; then
     exit 0
 fi
 
+record_terminal_size
 source_image="$(choose_logo)"
 LOGO_MODE_ACTIVE="$(logo_mode)"
 

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+# Background helper for waifufetch.
+#
+# Keeps a queue of ready-to-paint banners (image picked, kitty escape
+# rendered, tag rows resolved) and keeps the image buffer full. The fast
+# painter (waifufetch-paint) only prints fastfetch and cats files, so opening
+# a terminal does almost no work.
+#
+# Started on demand by the shell greeting; a lock file prevents duplicates.
+
+set -uo pipefail
+
+cache_dir="$HOME/.cache/fastfetch/waifus"
+lock="$cache_dir/helper.lock"
+pidfile="$cache_dir/helper.lock.pid"
+waifu="$HOME/.local/bin/waifufetch"
+queue="$cache_dir/paint.queue"
+target="${WAIFUFETCH_QUEUE_TARGET:-3}"
+
+mkdir -p "$cache_dir" 2>/dev/null || true
+
+exec 9>>"$lock" || exit 0
+if ! flock -n 9; then
+    exit 0                      # another helper is already running
+fi
+
+printf '%s\n' "$$" > "$pidfile" 2>/dev/null || true
+trap 'rm -f "$pidfile"; exit 0' INT TERM
+trap 'rm -f "$pidfile"' EXIT
+
+# This must never compete with the terminal opening.
+renice -n 10 -p "$$" >/dev/null 2>&1 || true
+
+while :; do
+    if [[ -x "$waifu" ]]; then
+        ready="$(find "$queue" -maxdepth 1 -type f -name '*.state' 2>/dev/null | wc -l)"
+        ready="${ready:-0}"
+        if (( ready < target )); then
+            WAIFUFETCH_LOGO_MODE=graphics "$waifu" --prepare-next >/dev/null 2>&1 || true
+            # Only top the buffer up a couple of images per pass so the queue
+            # gets attention too (a full 20-image prefetch would block it).
+            WAIFUFETCH_FILL_LIMIT=2 "$waifu" --prefetch-buffer >/dev/null 2>&1 || true
+            sleep 1
+            continue
+        fi
+    fi
+    sleep 10
+done

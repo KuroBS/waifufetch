@@ -12,6 +12,8 @@ install -m 755 "$repo_dir/bin/fastfetch-waifu" "$HOME/.config/fastfetch/fastfetc
 install -m 755 "$repo_dir/bin/waifufetch-tag-handler" "$HOME/.local/bin/waifufetch-tag-handler"
 install -m 755 "$repo_dir/bin/waifufetch-history" "$HOME/.local/bin/waifufetch-history"
 install -m 755 "$repo_dir/bin/waifufetch-greeting" "$HOME/.local/bin/waifufetch-greeting"
+install -m 755 "$repo_dir/bin/waifufetch-helper" "$HOME/.local/bin/waifufetch-helper"
+install -m 755 "$repo_dir/bin/waifufetch-paint" "$HOME/.local/bin/waifufetch-paint"
 ln -sfn "$HOME/.config/fastfetch/fastfetch-waifu" "$HOME/.local/bin/fastfetch-waifu"
 ln -sfn "$HOME/.config/fastfetch/fastfetch-waifu" "$HOME/.local/bin/waifufetch"
 
