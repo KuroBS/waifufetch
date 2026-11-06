@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+
+# waifudl - descarga una imagen de Gelbooru por tags y rating.
+#
+# Uso:
+#   waifudl [opciones] <tags...>
+#
+# Ejemplos:
+#   waifudl 1girl blue_hair
+#   waifudl 1girl cat_ears --rating general
+#   waifudl hatsune_miku -r s
+#   waifudl umamusume -o ~/Pictures/uma.jpg
+#   waifudl 1girl --print-url
+#
+# Opciones:
+#   -r, --rating RATING   rating: general | sensitive | questionable | explicit
+#                         (también g/s/q/e, y "rating:x" se acepta)
+#   -o, --output FILE     fichero de salida (por defecto: ./gelbooru-<id>.<ext>)
+#   --print-url           solo imprime la URL del post, sin descargar
+#   --id N                descarga un post concreto en vez de buscar
+#   --key K --user-id U   credenciales (por defecto lee
+#                         ~/.config/fastfetch/gelbooru-auth.conf)
+#   -h, --help            esta ayuda
+
+set -euo pipefail
+
+API="https://gelbooru.com/index.php"
+UA="waifudl/1.0"
+OUTPUT=""
+PRINT_URL=0
+POST_ID=""
+RATING=""
+KEY="${GELBOORU_API_KEY:-}"
+USER_ID="${GELBOORU_USER_ID:-}"
+TAGS=()
+
+usage() {
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+}
+
+die() {
+    printf 'waifudl: %s\n' "$1" >&2
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -r|--rating)
+            RATING="${2:-}"
+            [[ -n "$RATING" ]] || die "--rating necesita un valor"
+            shift 2
+            ;;
+        --rating=*)
+            RATING="${1#*=}"
+            shift
+            ;;
+        -o|--output)
+            OUTPUT="${2:-}"
+            [[ -n "$OUTPUT" ]] || die "--output necesita un fichero"
+            shift 2
+            ;;
+        --print-url)
+            PRINT_URL=1
+            shift
+            ;;
+        --id)
+            POST_ID="${2:-}"
+            [[ "$POST_ID" =~ ^[0-9]+$ ]] || die "--id necesita un número"
+            shift 2
+            ;;
+        --key)
+            KEY="${2:-}"
+            shift 2
+            ;;
+        --user-id)
+            USER_ID="${2:-}"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -*)
+            die "opción desconocida: $1"
+            ;;
+        *)
+            TAGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Credenciales: argumentos > entorno > fichero de auth de waifufetch.
+AUTH_FILE="$HOME/.config/fastfetch/gelbooru-auth.conf"
+if [[ -z "$KEY" || -z "$USER_ID" ]] && [[ -f "$AUTH_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$AUTH_FILE"
+    KEY="${GELBOORU_API_KEY:-$KEY}"
+    USER_ID="${GELBOORU_USER_ID:-$USER_ID}"
+fi
+[[ -n "$KEY" && -n "$USER_ID" ]] || die "faltan credenciales; ponlas con --key/--user-id o en $AUTH_FILE"
+
+# Traduce el rating a la forma larga de Gelbooru.
+norm_rating() {
+    local r="${1:-}"
+    r="${r#rating:}"
+    case "$r" in
+        g|general)       printf 'rating:general' ;;
+        s|sensitive)     printf 'rating:sensitive' ;;
+        q|questionable)  printf 'rating:questionable' ;;
+        e|explicit)      printf 'rating:explicit' ;;
+        *) die "rating no válido: $1 (usa g/s/q/e o general/sensitive/questionable/explicit)" ;;
+    esac
+}
+
+url_encode() {
+    jq -rn --arg v "$1" '$v|@uri'
+}
+
+query_posts() {
+    local tags="$1"
+    local extra=""
+    [[ -n "$RATING" ]] && tags="${tags:+$tags }$(norm_rating "$RATING")"
+    [[ -n "$POST_ID" ]] && extra="id=${POST_ID}"
+    [[ -z "$extra" ]] && extra="limit=100&tags=$(url_encode "$tags")+sort%3Arandom"
+
+    curl -fsSL --compressed --connect-timeout 5 --max-time 20 -A "$UA" \
+        "${API}?page=dapi&s=post&q=index&json=1&${extra}&api_key=$(url_encode "$KEY")&user_id=$(url_encode "$USER_ID")"
+}
+
+# Primer post con imagen válida (jpg/png/gif/webp), o el elegido al azar.
+pick_post() {
+    local json="$1"
+    if [[ -n "$POST_ID" ]]; then
+        jq -c '(.post | if type == "array" then (.[0] // empty) else . end) // empty' <<<"$json"
+    else
+        local n i
+        n="$(jq -r '[.post[]? | select((.file_url // "") != "" and (.file_url | test("\\.(jpe?g|png|gif|webp)$"; "i")))] | length' <<<"$json" 2>/dev/null || printf '0')"
+        [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || return 1
+        i=$((RANDOM % n))
+        jq -c --argjson i "$i" '[.post[]? | select((.file_url // "") != "" and (.file_url | test("\\.(jpe?g|png|gif|webp)$"; "i")))] | .[$i]' <<<"$json"
+    fi
+}
+
+json="$(query_posts "$(IFS=' '; printf '%s' "${TAGS[*]}")")" || die "la API no respondió (revisa credenciales o red)"
+
+post="$(pick_post "$json")" || die "no hay resultados para esos tags/rating"
+
+image_url="$(jq -r '.file_url // empty' <<<"$post")"
+post_id="$(jq -r '.id // empty' <<<"$post")"
+post_url="https://gelbooru.com/index.php?page=post&s=view&id=${post_id}"
+[[ -n "$image_url" && -n "$post_id" ]] || die "el post no tiene imagen descargable"
+
+if [[ "$PRINT_URL" -eq 1 ]]; then
+    printf '%s\n' "$post_url"
+    printf '%s\n' "$image_url"
+    exit 0
+fi
+
+ext="${image_url##*.}"
+ext="${ext%%\?*}"
+[[ "$ext" =~ ^(jpe?g|png|gif|webp)$ ]] || ext="jpg"
+if [[ -z "$OUTPUT" ]]; then
+    OUTPUT="gelbooru-${post_id}.${ext}"
+fi
+
+curl -fsSL --compressed --connect-timeout 5 --max-time 60 -A "$UA" \
+    -H "Referer: https://gelbooru.com/" "$image_url" -o "$OUTPUT" \
+    || die "falló la descarga de $image_url"
+
+printf '%s\n' "$OUTPUT"
+printf 'source: %s\n' "$post_url" >&2
