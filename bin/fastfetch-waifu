@@ -2,6 +2,13 @@
 
 set -euo pipefail
 
+# ImageMagick 7 ships `magick`; ImageMagick 6 (Debian/Ubuntu) only ships
+# `convert`. Shim them so the same script works on both.
+if ! command -v magick >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
+    magick() { convert "$@"; }
+    export -f magick 2>/dev/null || true
+fi
+
 CONFIG_DIR="$HOME/.config/fastfetch"
 TAGS_FILE="$CONFIG_DIR/waifu-tags.conf"
 AUTH_FILE="$CONFIG_DIR/danbooru-auth.conf"

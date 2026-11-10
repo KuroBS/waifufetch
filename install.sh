@@ -65,6 +65,13 @@ if command -v xdg-mime >/dev/null 2>&1; then
     xdg-mime default waifufetch-tag-handler.desktop x-scheme-handler/waifufetch-tag || true
 fi
 
+# Dependency hints: the two ImageMagick flavours.
+if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
+    printf '\nAviso: falta ImageMagick (magick/convert).\n'
+    printf '  Arch/CachyOS:  sudo pacman -S imagemagick\n'
+    printf '  Debian/Ubuntu: sudo apt install imagemagick\n'
+fi
+
 printf 'Installed waifufetch.\n'
 if [[ "${needs_gelbooru_auth:-0}" -eq 1 ]]; then
     printf 'Fill in your Gelbooru credentials: %s\n' "$HOME/.config/fastfetch/gelbooru-auth.conf"

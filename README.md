@@ -46,7 +46,7 @@ its dithering, set `LOGO_MODE=chafa` in
 - `fastfetch` (image support does *not* require the optional `chafa` library: this fork renders the blocks itself)
 - `curl`
 - `jq`
-- ImageMagick `magick`
+- ImageMagick (`magick` en v7, `convert` en v6 - ambos valen)
 - `kitty`/`kitten` for the best terminal image experience (optional; chafa is used otherwise)
 - Optional: `img2sixel` as another fallback
 
