@@ -281,7 +281,7 @@ download_waifu_gelbooru() {
         rm -f "$tmp"
         return 1
     fi
-    if ! magick "$tmp[0]" -auto-orient -resize '1050x1050>' "$output"; then
+    if ! magick "$tmp[0]" -auto-orient -resize '1050x1050>' "$output" 2>/dev/null; then
         rm -f "$tmp"
         return 1
     fi
@@ -507,12 +507,13 @@ tag_max_len() {
 # Measured: the logo area is max(content, config width - 1) plus the paddings,
 # so a narrow picture does not pull the box to the left.
 text_column_for_width() {
-    local logo_w="$1" width left top right
+    local logo_w="$1" left right
 
-    width="$(logo_columns)"
     read -r left _ right < <(logo_padding)
-    (( logo_w < width - 1 )) && logo_w=$((width - 1))
 
+    # Keep the box next to the picture that was actually rendered: fastfetch is
+    # told the same width with "--logo-width", so no gap is reserved for a
+    # picture that does not exist in a narrow terminal.
     printf '%s\n' "$((logo_w + left + right))"
 }
 
@@ -534,22 +535,51 @@ tag_width_cap() {
     printf '%s\n' "$cap"
 }
 
+# Widest line the module box actually prints (the disk/cpu rows are ~45
+# chars). Cached: one fastfetch run costs ~35 ms and the value only changes
+# when config.jsonc changes.
+box_text_width() {
+    local f="$CACHE_DIR/box-width" w
+
+    if [[ -s "$f" && "$f" -nt "$CONFIG_DIR/config.jsonc" ]]; then
+        w="$(cat "$f" 2>/dev/null || true)"
+        if [[ "$w" =~ ^[0-9]+$ && "$w" -gt 10 ]]; then
+            printf '%s\n' "$w"
+            return 0
+        fi
+    fi
+
+    # Only the built-in rows: the tag/source rows are "command" modules whose
+    # width depends on this very geometry, so measuring them would be circular.
+    w="$(fastfetch --logo none --pipe \
+            --structure Title,OS,Host,Kernel,Uptime,Shell,Terminal,WM,DE,CPU,Memory,Disk 2>/dev/null \
+        | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')"
+    [[ "$w" =~ ^[0-9]+$ && "$w" -gt 10 ]] || w=45
+    (( w > 60 )) && w=60
+    printf '%s\n' "$w" > "$f" 2>/dev/null || true
+    printf '%s\n' "$w"
+}
+
 # Largest logo that fits next to the module box in the current terminal.
 # Prints "<columns> <lines>".
 logo_geometry() {
-    local cfg_cols tcols tlines box avail_cols avail_lines
+    local tcols tlines box avail_cols avail_lines
 
-    cfg_cols="$(logo_columns)"
     read -r tcols tlines < <(terminal_cells 2>/dev/null || printf '100 30\n')
     [[ "$tcols" =~ ^[0-9]+$ ]] || tcols=100
     [[ "$tlines" =~ ^[0-9]+$ ]] || tlines=30
 
-    box="$(fastfetch_text_column)"
-    avail_cols=$((tcols - box - 2))
+    # Leave room for the box's own text, not just its padding: using
+    # logo.width here made the banner wrap in windows narrower than ~90.
+    box="$(box_text_width)"
+    read -r pad_left _ pad_right < <(logo_padding)
+    avail_cols=$((tcols - box - pad_left - pad_right - 1))
     avail_lines=$((tlines - 1))
 
-    (( avail_cols < cfg_cols )) && avail_cols="$cfg_cols"
-    (( avail_cols < 20 )) && avail_cols=20
+    # Shrink with the terminal. The old line forced the configured width as a
+    # minimum, so a narrow window got a full-size picture and wrapped the box.
+    # logo.width is now only a maximum; fastfetch gets "--logo-width" below.
+    (( avail_cols < 8 )) && avail_cols=8
     (( avail_cols > 120 )) && avail_cols=120
     if [[ "${LOGO_MAX_COLS:-}" =~ ^[0-9]+$ ]] && (( avail_cols > LOGO_MAX_COLS )); then
         avail_cols="$LOGO_MAX_COLS"
@@ -848,7 +878,7 @@ graphics_banner() {
     mkdir -p "$CACHE_DIR" 2>/dev/null || true
     awk -v n="$lines" -v w="$cols" 'BEGIN { s = ""; for (i = 0; i < w; i++) s = s " "; for (j = 0; j < n; j++) print s }' > "$blank" 2>/dev/null || return 1
 
-    args=(--logo "$blank" --logo-type file-raw)
+    args=(--logo "$blank" --logo-type file-raw --logo-width "$cols")
 
     # The tag rows are printed by a child process that indents continuation
     # lines with a cursor-forward escape; it needs the real logo width or the
@@ -1182,7 +1212,7 @@ download_waifu() {
         rm -f "$tmp"
         return 1
     fi
-    if ! magick "$tmp[0]" -auto-orient -resize '1050x1050>' "$output"; then
+    if ! magick "$tmp[0]" -auto-orient -resize '1050x1050>' "$output" 2>/dev/null; then
         rm -f "$tmp"
         return 1
     fi
@@ -1921,6 +1951,15 @@ run_slideshow() {
 terminal_cells() {
     local cols lines
 
+    # This is normally called inside $( ), where stdout is a pipe and
+    # "[[ -t 1 ]]" is false even in a real terminal. Ask /dev/tty first so the
+    # logo is rendered for the window that is actually open.
+    if read -r lines cols < <(stty size 2>/dev/null </dev/tty) \
+        && [[ "$cols" =~ ^[0-9]+$ && "$cols" -gt 0 && "$lines" =~ ^[0-9]+$ && "$lines" -gt 0 ]]; then
+        printf '%s %s\n' "$cols" "$lines"
+        return 0
+    fi
+
     # Outside a terminal (background helper) there is no size to query: reuse
     # the last one a real terminal reported, so the helper pre-renders the
     # escapes for the geometry that will actually be used.
@@ -2610,7 +2649,12 @@ ensure_logo_image || true
 
 if [[ "$LOGO_MODE_ACTIVE" == "ansi" && -s "$LOGO_ANSI" ]]; then
     logo="$LOGO_ANSI"
-    LOGO_ARGS=(--logo "$LOGO_ANSI" --logo-type file-raw)
+    # Tell fastfetch the real width of the rendered blocks: without it the logo
+    # area is padded to logo.width (33) and the box drifts right, so a narrow
+    # terminal wrapped the banner.
+    ansi_w="$(cat "$LOGO_ANSI.width" 2>/dev/null || true)"
+    [[ "$ansi_w" =~ ^[0-9]+$ ]] || ansi_w="$(logo_columns)"
+    LOGO_ARGS=(--logo "$LOGO_ANSI" --logo-type file-raw --logo-width "$ansi_w")
 elif [[ -s "$source_image" && -r "$source_image" ]]; then
     logo="$source_image"
     LOGO_ARGS=(--logo "$logo")

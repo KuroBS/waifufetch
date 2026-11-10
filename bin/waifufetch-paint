@@ -65,7 +65,7 @@ fi
 # Prepared for a wider terminal than this one? Regenerate through the full
 # path instead of wrapping the box or showing a stale logo.
 tc_now="$(tput cols 2>/dev/null || printf '100')"
-if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( text_col + 37 > tc_now )); then
+if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( text_col + 30 > tc_now )); then
     rm -f "$state"
     if [[ -x "$HOME/.local/bin/waifufetch" ]]; then
         exec "$HOME/.local/bin/waifufetch" "$@"
@@ -91,7 +91,7 @@ printf '%s/%s\n' "$bufn" "${bufsz:-50}" > "$banner/cache.txt" 2>/dev/null || tru
 out="$(mktemp --tmpdir="$cache" paint.XXXXXX 2>/dev/null)" || fallback "$@"
 
 printf '\033[2J\033[H'
-fastfetch --logo "$blank" --logo-type file-raw >"$out" 2>/dev/null
+fastfetch --logo "$blank" --logo-type file-raw --logo-width "$cols" >"$out" 2>/dev/null
 rc=$?
 lines_out="$(wc -l < "$out" 2>/dev/null || printf '0')"
 [[ "$lines_out" =~ ^[0-9]+$ && "$lines_out" -gt 0 ]] || lines_out="$lines"
