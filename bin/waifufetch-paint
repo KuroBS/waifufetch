@@ -80,6 +80,18 @@ if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( want > tc_now - 1 || want < tc_now - 4 )); 
     fallback "$@"
 fi
 
+# Remember which picture this window is showing, so "--redraw" repaints this
+# one and not whatever the newest global image happens to be.
+tkey="${KITTY_WINDOW_ID:+kitty-$KITTY_WINDOW_ID}"
+if [[ -z "$tkey" ]]; then
+    tnow="$(tty 2>/dev/null || true)"
+    case "$tnow" in /dev/*) tkey="${tnow//\//_}" ;; esac
+fi
+if [[ -n "$tkey" ]]; then
+    mkdir -p "$cache/terminals" 2>/dev/null || true
+    printf '%s\n' "$image" > "$cache/terminals/$tkey" 2>/dev/null || true
+fi
+
 export FASTFETCH_WAIFU_SOURCE="$source"
 export FASTFETCH_WAIFU_TEXT_COLUMN="$text_col"
 

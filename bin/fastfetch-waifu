@@ -1214,7 +1214,7 @@ buffer_count() {
 ensure_logo_image() {
     local target mode cols lines wanted
 
-    target="$(readlink -f "$CURRENT_IMAGE" 2>/dev/null || true)"
+    target="$(choose_logo 2>/dev/null || true)"
     mode="$(logo_mode)"
 
     if [[ -z "$target" || ! -s "$target" ]]; then
@@ -1397,7 +1397,56 @@ refresh_buffer_async() {
     exec {lock_fd}>&-
 }
 
+# Stable id for the terminal a command runs in: kitty's window id when
+# available (it survives shell restarts inside the window), else the tty.
+terminal_key() {
+    local t
+
+    if [[ -n "${KITTY_WINDOW_ID:-}" ]]; then
+        printf 'kitty-%s\n' "$KITTY_WINDOW_ID"
+        return 0
+    fi
+    t="$(tty 2>/dev/null || true)"
+    case "$t" in
+        /dev/*) printf '%s\n' "${t//\//_}" ;;
+        *) printf '%s\n' "" ;;
+    esac
+}
+
+# Remember which picture this terminal is showing, so "--redraw" repaints the
+# one above the prompt instead of whatever the newest global image is.
+record_terminal_image() {
+    local image="$1" key dir
+
+    [[ -s "$image" ]] || return 0
+    key="$(terminal_key)"
+    [[ -n "$key" ]] || return 0
+    dir="$CACHE_DIR/terminals"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    printf '%s\n' "$image" > "$dir/$key" 2>/dev/null || true
+    # Drop records of terminals that are long gone.
+    find "$dir" -type f -mtime +7 -delete 2>/dev/null || true
+}
+
+# Picture this terminal is showing, if it is still in the cache.
+terminal_image() {
+    local key file
+
+    key="$(terminal_key)"
+    [[ -n "$key" ]] || return 1
+    file="$CACHE_DIR/terminals/$key"
+    [[ -s "$file" ]] || return 1
+    local image
+    image="$(cat "$file" 2>/dev/null || true)"
+    [[ -s "$image" ]] || return 1
+    printf '%s\n' "$image"
+}
+
 choose_logo() {
+    if [[ -n "${WAIFUFETCH_IMAGE:-}" && -s "${WAIFUFETCH_IMAGE:-}" ]]; then
+        printf '%s\n' "$WAIFUFETCH_IMAGE"
+        return 0
+    fi
     if [[ -s "$CURRENT_IMAGE" ]]; then
         readlink -f "$CURRENT_IMAGE"
     elif [[ -s "$LOGO_IMAGE" ]]; then
@@ -2004,7 +2053,15 @@ if [[ "$FORCED_REFRESH" -eq 0 && "$REDRAW" -eq 0 ]]; then
 fi
 
 record_terminal_size
+
+if [[ "$REDRAW" -eq 1 ]]; then
+    # Repaint the picture this very terminal is showing, not the newest one.
+    redraw_image="$(terminal_image 2>/dev/null || true)"
+    [[ -n "$redraw_image" ]] && export WAIFUFETCH_IMAGE="$redraw_image"
+fi
+
 source_image="$(choose_logo)"
+record_terminal_image "$source_image"
 LOGO_MODE_ACTIVE="$(logo_mode)"
 
 # The tag rows are the widest module lines, so the logo width has to leave
