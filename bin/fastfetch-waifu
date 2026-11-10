@@ -464,14 +464,17 @@ logo_columns() {
 # Measured: the logo area is max(content, config width - 1) plus the paddings,
 # so a narrow picture does not pull the box to the left.
 text_column_for_width() {
-    local logo_w="$1" left right
+    local logo_w="$1" content="${2:-$1}" left right w
 
     read -r left _ right < <(logo_padding)
 
-    # Keep the box next to the picture that was actually rendered: fastfetch is
-    # told the same width with "--logo-width", so no gap is reserved for a
-    # picture that does not exist in a narrow terminal.
-    printf '%s\n' "$((logo_w + left + right))"
+    # fastfetch pads the logo area to max(content, logo width - 1): with a
+    # centring margin the blank file is narrower than the area, so the box
+    # starts one column earlier than "logo_w + paddings".
+    w=$((logo_w - 1))
+    (( content > w )) && w="$content"
+
+    printf '%s\n' "$((w + left + right))"
 }
 
 # Widest the logo may get so the module box (prefix + longest tag) still fits
@@ -863,7 +866,7 @@ graphics_banner() {
     # The tag rows are printed by a child process that indents continuation
     # lines with a cursor-forward escape; it needs the real logo width or the
     # copyright/character lines end up inside the picture area.
-    export FASTFETCH_WAIFU_TEXT_COLUMN="$(text_column_for_width "$area")"
+    export FASTFETCH_WAIFU_TEXT_COLUMN="$(text_column_for_width "$area" "$cols")"
     write_banner_files
 
     # Single fastfetch pass: capture it to a temp file to learn the exact line
@@ -979,7 +982,7 @@ prepare_next_banner() {
     escf="$(escape_cache_file "$image" "$cols" "$lines")"
     kitty_image_escape_cached "$image" "$cols" "$lines" >/dev/null 2>&1 || return 1
 
-    text_col="$(text_column_for_width "$area")"
+    text_col="$(text_column_for_width "$area" "$cols")"
 
     # Tags carry newlines, so they cannot live in the single-line state file:
     # pre-format them into per-entry files the painter copies into place.
@@ -1494,10 +1497,11 @@ tags_for_fastfetch() {
     local line kind value label linked_value text_column first=1 tcols avail
 
     text_column="$(fastfetch_text_column)"
-    read -r tcols _ < <(terminal_cells 2>/dev/null || printf '100 30\n')
-    [[ "$tcols" =~ ^[0-9]+$ ]] || tcols=100
-    # 17 = "| <icon> character| " plus a small right margin.
-    avail=$((tcols - text_column - 17))
+    # Tags are shortened to the module box width, not to the terminal: a long
+    # character name used to make those rows wider than the rest of the box,
+    # which broke the right edge and the centring. The number of tags now only
+    # changes the height.
+    avail=$(( $(box_text_width) - 18 ))
     (( avail < 12 )) && avail=12
 
     while IFS= read -r line; do
