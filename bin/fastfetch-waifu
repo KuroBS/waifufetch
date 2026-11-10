@@ -496,22 +496,6 @@ tag_width_cap() {
 }
 
 # Horizontal centring of the whole banner (picture + module box) for windows
-# wider than the content. Prints "<logo area> <left margin>": the area is what
-# fastfetch is told with --logo-width and the margin is where the picture goes.
-logo_layout() {
-    local cols="$1" tcols box left right total margin
-
-    read -r tcols _ < <(terminal_cells 2>/dev/null || printf '100 30')
-    [[ "$tcols" =~ ^[0-9]+$ ]] || tcols=100
-    box="$(box_text_width)"
-    read -r left _ right < <(logo_padding)
-    total=$(( cols + left + right + box ))
-    margin=$(( (tcols - total) / 2 ))
-    (( margin < 0 )) && margin=0
-    # The area is only widened on the left: fastfetch already adds the right
-    # padding, so "cols + 2*margin" would push the box one margin too far.
-    printf '%s %s\n' "$(( cols + margin ))" "$margin"
-}
 
 # Widest line the module box actually prints (the disk/cpu rows are ~45
 # chars). Cached: one fastfetch run costs ~35 ms and the value only changes
@@ -856,7 +840,7 @@ graphics_banner() {
 
     read -r pad_left pad_top pad_right < <(logo_padding)
     read -r cols lines < <(graphics_geometry "$image")
-    read -r area margin < <(logo_layout "$cols")
+    area="$cols"
     blank="$CACHE_DIR/logo-blank.txt"
     mkdir -p "$CACHE_DIR" 2>/dev/null || true
     awk -v n="$lines" -v w="$cols" 'BEGIN { s = ""; for (i = 0; i < w; i++) s = s " "; for (j = 0; j < n; j++) print s }' > "$blank" 2>/dev/null || return 1
@@ -885,10 +869,8 @@ graphics_banner() {
     printf '\033[%dA\033[1G' "$lines_out"
     if (( pad_top )); then printf '\033[%dB' "$pad_top"; fi
 
-    # The banner is centred as a block: the logo area is "cols + 2*margin"
-    # wide, so the picture starts after the margin and the box ends up centred
-    # with it instead of hugging the left edge of a wide window.
-    hoffset=$(( pad_left + margin ))
+    # Flush left: the picture starts right after the left padding.
+    hoffset="$pad_left"
     if (( hoffset )); then printf '\033[%dC' "$hoffset"; fi
 
     if ! kitty_image_escape_cached "$image" "$cols" "$lines"; then
@@ -970,8 +952,8 @@ prepare_next_banner() {
     LOGO_MAX_COLS="$(tag_width_cap "$tags")"
 
     read -r cols lines < <(graphics_geometry "$image")
-    read -r area margin < <(logo_layout "$cols")
-    hoffset=$(( pad_left + margin ))
+    area="$cols"
+    hoffset="$pad_left"
     entry="$PAINT_QUEUE/$(date +%s%N)"
 
     # Per-entry blank file: a shared one would be clobbered by the next
@@ -1346,25 +1328,54 @@ promote_file_as_current() {
     cp -f "$unique" "$LOGO_IMAGE" 2>/dev/null || true
 }
 
+# How much of the free cell rectangle an image would fill, keeping its aspect.
+# Used to pick a picture that suits the window: a wide window looks better with
+# a landscape picture, a tall one with a portrait.
+aspect_score() {
+    local image="$1" x=0 y=0
+
+    # Same maths the renderer uses, so the score matches what will be drawn.
+    read -r x y < <(graphics_geometry "$image" 2>/dev/null) || true
+    [[ "$x" =~ ^[0-9]+$ && "$y" =~ ^[0-9]+$ ]] || { printf '0\n'; return 0; }
+    printf '%s\n' "$(( x * y ))"
+}
+
 promote_buffer_image() {
-    local image
+    local image="" best="" best_score=0 score=0 maxc=0 maxl=0
+    local -a cands=()
 
     if [[ ! -d "$BUFFER_DIR" ]]; then
         return 1
     fi
 
-    while IFS= read -r image; do
-        if [[ -s "$image" && -s "${image%.*}.url" ]]; then
-            promote_file_as_current "$image"
-            return $?
-        fi
-    done < <(
+    # Oldest six, so the buffer still drains roughly in order.
+    mapfile -t cands < <(
         find "$BUFFER_DIR" -maxdepth 1 -type f -name '*.png' -printf '%T@ %p\n' 2>/dev/null \
-            | sort -n \
-            | awk '{print $2}' || true
+            | sort -n | awk '{print $2}' | head -n 6 || true
     )
 
-    return 1
+    if (( ${#cands[@]} > 0 )) && read -r maxc maxl < <(logo_geometry); then
+        for image in "${cands[@]}"; do
+            [[ -s "$image" && -s "${image%.*}.url" ]] || continue
+            score="$(aspect_score "$image")"
+            if [[ -z "$best" ]] || (( score > best_score )); then
+                best="$image"
+                best_score="$score"
+            fi
+        done
+    fi
+
+    if [[ -z "$best" ]]; then
+        for image in "${cands[@]}"; do
+            if [[ -s "$image" && -s "${image%.*}.url" ]]; then
+                promote_file_as_current "$image"
+                return $?
+            fi
+        done
+        return 1
+    fi
+
+    promote_file_as_current "$best"
 }
 
 refresh_buffer_async() {
