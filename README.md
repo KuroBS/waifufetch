@@ -85,6 +85,7 @@ waifufetch --buffer-size 20
 waifufetch --open-source
 waifufetch --buffer-count
 waifufetch --doctor
+waifufetch --redraw              # repaint the same picture at the window size
 ```
 
 ## Configuration

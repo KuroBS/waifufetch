@@ -69,6 +69,7 @@ Waifu options:
   --buffer-count       Muestra cuantas imagenes hay en el buffer
   --doctor             Diagnostico: terminal, config, logo y cache
   --ensure-logo        Genera el logo (ANSI) desde la imagen actual y sale
+  --redraw             Repinta la imagen actual al tamano de la ventana
   --prepare-escapes    Pre-genera los escapes de las siguientes imagenes
   --prepare-next       Prepara un banner completo para el pintor rapido
   --maintain-cache     Recorta las copias mas antiguas de la cache
@@ -1735,6 +1736,7 @@ PRINT_IMAGE_TAGS_FASTFETCH=0
 OPEN_SOURCE=0
 DOCTOR=0
 ENSURE_LOGO=0
+REDRAW=0
 PREPARE_ESCAPES=0
 PREPARE_NEXT=0
 MAINTAIN_CACHE=0
@@ -1792,6 +1794,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --ensure-logo)
             ENSURE_LOGO=1
+            shift
+            ;;
+        --redraw)
+            # Same picture, repainted at the size of the window as it is now.
+            REDRAW=1
             shift
             ;;
         --maintain-cache)
@@ -1988,7 +1995,7 @@ if [[ ! -s "$CURRENT_IMAGE" && "$FORCED_REFRESH" -eq 1 ]]; then
     promote_next_image >/dev/null 2>&1 || true
 fi
 
-if [[ "$FORCED_REFRESH" -eq 0 ]]; then
+if [[ "$FORCED_REFRESH" -eq 0 && "$REDRAW" -eq 0 ]]; then
     prune_buffer
     FASTFETCH_WAIFU_BUFFER="$(buffer_count)/$BUFFER_SIZE"
     promote_buffer_image >/dev/null 2>&1 || true
@@ -2022,6 +2029,12 @@ if [[ "$NO_LOGO" -eq 0 && "$LOGO_MODE_ACTIVE" == "graphics" && -s "$source_image
         exit 0
     fi
     # fall through to the ANSI renderer if kitty could not draw the image
+fi
+
+if [[ "$REDRAW" -eq 1 ]]; then
+    # Repaint from the top: the old banner may have been drawn for a bigger
+    # window and would be left behind.
+    printf '\033[2J\033[H'
 fi
 
 [[ "$NO_LOGO" -eq 0 ]] && ensure_logo_image || true
