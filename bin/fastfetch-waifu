@@ -540,7 +540,7 @@ logo_geometry() {
     # Leave the last rows free: the shell prompt prints right after the banner
     # and fish adds a newline before the greeting, so a picture that filled the
     # screen scrolled the terminal and ate the first rows of the box.
-    avail_lines=$((tlines - 6))
+    avail_lines=$((tlines - 8))
 
     # Shrink with the terminal. The old line forced the configured width as a
     # minimum, so a narrow window got a full-size picture and wrapped the box.
