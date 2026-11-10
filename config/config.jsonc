@@ -66,12 +66,14 @@
         {
             "key": "│ {#34}󰍛 cpu      {#keys}│",
             "type": "cpu",
-            "showPeCoreCount": true
+            "showPeCoreCount": true,
+            "format": "{name} ({cores-logical})"
         },
         {
             "key": "│ {#34}󰉉 disk     {#keys}│",
             "type": "disk",
-            "folders": "/"
+            "folders": "/",
+            "format": "{size-used} / {size-total}"
         },
         {
             "key": "│ {#34} memory   {#keys}│",

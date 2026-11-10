@@ -65,7 +65,14 @@ fi
 # Prepared for a wider terminal than this one? Regenerate through the full
 # path instead of wrapping the box or showing a stale logo.
 tc_now="$(tput cols 2>/dev/null || printf '100')"
-if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( text_col + 30 > tc_now )); then
+# The banner must have been prepared for a window this size: a narrower one
+# wraps the box, a much wider one leaves a tiny picture next to a lot of empty
+# space. The expected width is text_col + box width, and the box width is
+# cached from the current config.
+box_w="$(cat "$cache/box-width-v2" 2>/dev/null || printf '41')"
+[[ "$box_w" =~ ^[0-9]+$ ]] || box_w=41
+want=$(( text_col + box_w ))
+if [[ "$tc_now" =~ ^[0-9]+$ ]] && (( want > tc_now - 1 || want < tc_now - 4 )); then
     rm -f "$state"
     if [[ -x "$HOME/.local/bin/waifufetch" ]]; then
         exec "$HOME/.local/bin/waifufetch" "$@"

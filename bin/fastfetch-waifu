@@ -496,7 +496,7 @@ tag_width_cap() {
 # chars). Cached: one fastfetch run costs ~35 ms and the value only changes
 # when config.jsonc changes.
 box_text_width() {
-    local f="$CACHE_DIR/box-width" w
+    local f="$CACHE_DIR/box-width-v2" w
 
     if [[ -s "$f" && "$f" -nt "$CONFIG_DIR/config.jsonc" ]]; then
         w="$(cat "$f" 2>/dev/null || true)"
@@ -506,10 +506,11 @@ box_text_width() {
         fi
     fi
 
-    # Only the built-in rows: the tag/source rows are "command" modules whose
-    # width depends on this very geometry, so measuring them would be circular.
-    w="$(fastfetch --logo none --pipe \
-            --structure Title,OS,Host,Kernel,Uptime,Shell,Terminal,WM,DE,CPU,Memory,Disk 2>/dev/null \
+    # Measure what the box really prints, minus the tag/source rows: their
+    # width depends on this very geometry, so including them is circular.
+    w="$(fastfetch --logo none --pipe 2>/dev/null \
+        | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' \
+        | grep -v ']8;;' \
         | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')"
     [[ "$w" =~ ^[0-9]+$ && "$w" -gt 10 ]] || w=45
     (( w > 60 )) && w=60
@@ -1972,7 +1973,15 @@ export FASTFETCH_WAIFU_BUFFER="${FASTFETCH_WAIFU_BUFFER:-$(buffer_count)/$BUFFER
 export FASTFETCH_WAIFU_TAGS="$tag_text"
 LOGO_MAX_COLS="$(tag_width_cap "$tag_text")"
 
-if [[ "$LOGO_MODE_ACTIVE" == "graphics" && -s "$source_image" && -t 1 ]]; then
+# In a narrow window the box alone already fills the line: drawing a 4-column
+# picture next to it only leaves a sliver and pushes the tags off-screen, so
+# show the box alone instead.
+NO_LOGO=0
+read -r logo_cols _ < <(logo_geometry)
+[[ "$logo_cols" =~ ^[0-9]+$ ]] || logo_cols=0
+(( logo_cols < 12 )) && NO_LOGO=1
+
+if [[ "$NO_LOGO" -eq 0 && "$LOGO_MODE_ACTIVE" == "graphics" && -s "$source_image" && -t 1 ]]; then
     if graphics_banner "$source_image"; then
         prefetch_escape_async
         exit 0
@@ -1980,9 +1989,12 @@ if [[ "$LOGO_MODE_ACTIVE" == "graphics" && -s "$source_image" && -t 1 ]]; then
     # fall through to the ANSI renderer if kitty could not draw the image
 fi
 
-ensure_logo_image || true
+[[ "$NO_LOGO" -eq 0 ]] && ensure_logo_image || true
 
-if [[ "$LOGO_MODE_ACTIVE" == "ansi" && -s "$LOGO_ANSI" ]]; then
+if [[ "$NO_LOGO" -eq 1 ]]; then
+    logo=""
+    LOGO_ARGS=(--logo none)
+elif [[ "$LOGO_MODE_ACTIVE" == "ansi" && -s "$LOGO_ANSI" ]]; then
     logo="$LOGO_ANSI"
     # Tell fastfetch the real width of the rendered blocks: without it the logo
     # area is padded to logo.width (33) and the box drifts right, so a narrow
