@@ -532,7 +532,10 @@ logo_geometry() {
     box="$(box_text_width)"
     read -r pad_left _ pad_right < <(logo_padding)
     avail_cols=$((tcols - box - pad_left - pad_right - 1))
-    avail_lines=$((tlines - 1))
+    # Leave the last rows free: the shell prompt prints right after the banner
+    # and, when the picture filled the screen, that extra line scrolled the
+    # whole thing up and ate the first rows of the box.
+    avail_lines=$((tlines - 3))
 
     # Shrink with the terminal. The old line forced the configured width as a
     # minimum, so a narrow window got a full-size picture and wrapped the box.
@@ -863,8 +866,10 @@ graphics_banner() {
     # Centre the picture in the free space: a portrait image is narrower than
     # the area, and without this it would hug the left edge with a big gap.
     read -r maxc _ < <(logo_geometry)
-    hoffset=$(( pad_left + (maxc - cols) / 2 ))
-    (( hoffset < pad_left )) && hoffset="$pad_left"
+    # The logo area is exactly "cols" wide (fastfetch is told that width with
+    # --logo-width), so the picture starts at the left padding. Centring it in
+    # the old, wider area drew it on top of the module box.
+    hoffset="$pad_left"
     if (( hoffset )); then printf '\033[%dC' "$hoffset"; fi
 
     if ! kitty_image_escape_cached "$image" "$cols" "$lines"; then
@@ -947,8 +952,7 @@ prepare_next_banner() {
 
     read -r cols lines < <(graphics_geometry "$image")
     read -r maxc _ < <(logo_geometry)
-    hoffset=$(( pad_left + (maxc - cols) / 2 ))
-    (( hoffset < pad_left )) && hoffset="$pad_left"
+    hoffset="$pad_left"
     entry="$PAINT_QUEUE/$(date +%s%N)"
 
     # Per-entry blank file: a shared one would be clobbered by the next
@@ -974,7 +978,7 @@ prepare_next_banner() {
     # Write atomically so the painter never reads a half-written state while
     # the helper is preparing it (a partial line used to force the slow
     # fallback path).
-    printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf 'v3\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$image" "$cols" "$lines" "$escf" "$blank" "$source" \
         "$entry.tags" "$entry.source" "$text_col" "$pad_top" "$hoffset" \
         > "$entry.state.tmp" 2>/dev/null || return 1

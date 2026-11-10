@@ -56,7 +56,7 @@ else
 fi
 
 IFS=$'\t' read -r ver image cols lines esc blank source tags_file source_file text_col pad_top hoffset < "$state" || fallback "$@"
-if [[ "$ver" != "v2" ]]; then
+if [[ "$ver" != "v3" ]]; then
     rm -f "$state"
     fallback "$@"
 fi
