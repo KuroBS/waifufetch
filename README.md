@@ -1,6 +1,6 @@
 # waifufetch (Gelbooru fork)
 
-`waifufetch` is a fastfetch wrapper that shows a booru image as the terminal logo, caches images locally, prints clickable image tags, and keeps a small image history.
+`waifufetch` is a fastfetch wrapper that shows a booru image as the terminal logo, caches images locally, and prints clickable image tags.
 
 This fork (branched from [KuroBS/waifufetch](https://github.com/KuroBS/waifufetch)) adds **Gelbooru** as the default image source, because `danbooru.donmai.us` is unreachable from some networks/regions (Cloudflare blocks it). Danbooru is still available by changing one config line.
 
@@ -11,15 +11,13 @@ This fork (branched from [KuroBS/waifufetch](https://github.com/KuroBS/waifufetc
 - **Rating translation** between sites: `rating:g|s|q|e` (danbooru style) is sent as `rating:general|sensitive|questionable|explicit` on Gelbooru, and vice versa. Existing configs keep working.
 - **Hotlink fix**: Gelbooru's image CDN redirects to the post page unless a `Referer: https://gelbooru.com/` header is sent.
 - **Survives API outages**: an unreachable API no longer aborts the script; it warns and keeps showing the cached image.
-- **Renders without libchafa**: fastfetch only draws image logos when the optional `chafa` library is installed; when it is missing fastfetch silently prints the distro ASCII logo (tags show, picture does not). This fork pre-renders the picture as truecolor ANSI half-blocks (`logo.ansi`) with ImageMagick and prints it via `logo.type: "file-raw"`, so the image shows in alacritty, xterm, kitty, tmux... with no extra packages. History previews, slideshow and collage use the same renderer.
+- **Renders without libchafa**: fastfetch only draws image logos when the optional `chafa` library is installed; when it is missing fastfetch silently prints the distro ASCII logo (tags show, picture does not). This fork pre-renders the picture as truecolor ANSI half-blocks (`logo.ansi`) with ImageMagick and prints it via `logo.type: "file-raw"`, so the image shows in alacritty, xterm, kitty, tmux... with no extra packages.
 - **Clicking a tag keeps the rating filter**, so a click never drops the SFW restriction.
 
 ## Features (upstream)
 
-- Booru image fetching with local buffer and history.
+- Booru image fetching with a local buffer.
 - Fastfetch integration with image logo.
-- Full-terminal slideshow mode with pause, next image, live delay changes, and cache rotation.
-- Auto-sized collage mode that fills the terminal with cached images.
 - Clickable `artist`, `copyright`, and `character` tags in OSC 8 capable terminals (kitty, alacritty, wezterm...).
 - Click a tag to write it to `~/.config/fastfetch/waifu-tags.conf`.
 - Manual edits to `waifu-tags.conf` are detected and refresh the image buffer.
@@ -85,44 +83,8 @@ waifufetch --rating general      # or s / q / e, g/q also accepted
 waifufetch --rating ""           # drop the rating filter
 waifufetch --buffer-size 20
 waifufetch --open-source
-waifufetch --history
-waifufetch --history 5
-waifufetch --history all
-waifufetch-history 5
-waifufetch --slideshow
-waifufetch --slideshow --slide-delay 12
-waifufetch --collage
-waifufetch --collage 12
-```
-
-## Slideshow
-
-`waifufetch --slideshow` shows the image as large as the terminal allows, keeps rotating through the local buffer while refilling it in the background, and reserves the top lines for clickable artist, IP/copyright, characters, controls, and source.
-
-Controls:
-
-```text
-space  pause/resume
-n      next image
-+ / -  increase/decrease delay
-o      open current source
-q      quit
-```
-
-The initial delay is configured per run:
-
-```bash
-waifufetch --slideshow --slide-delay 10
-```
-
-## Collage
-
-`waifufetch --collage` skips fastfetch and renders only a collage of cached images. It measures the terminal size and chooses an appropriate grid automatically.
-
-You can force the number of images:
-
-```bash
-waifufetch --collage 12
+waifufetch --buffer-count
+waifufetch --doctor
 ```
 
 ## Configuration
@@ -158,7 +120,7 @@ Opening a terminal is split into a background helper and a fast painter:
 - The config's tag/source rows are pre-formatted by `waifufetch-banner-files`
   and the config just `cat`s them: the old module spawned the whole script
   (~220 ms); fastfetch with this config runs in ~35 ms.
-- Manual commands (`waifufetch`, `--slideshow`, ...) keep working unchanged.
+- Manual commands (`waifufetch`, `--tag`, `--prefetch-buffer`, ...) keep working unchanged.
 
 Both the helper and its downloads run at `nice +10`, so they never compete
 with the terminal opening.
