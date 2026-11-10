@@ -492,6 +492,24 @@ tag_width_cap() {
     printf '%s\n' "$cap"
 }
 
+# Horizontal centring of the whole banner (picture + module box) for windows
+# wider than the content. Prints "<logo area> <left margin>": the area is what
+# fastfetch is told with --logo-width and the margin is where the picture goes.
+logo_layout() {
+    local cols="$1" tcols box left right total margin
+
+    read -r tcols _ < <(terminal_cells 2>/dev/null || printf '100 30')
+    [[ "$tcols" =~ ^[0-9]+$ ]] || tcols=100
+    box="$(box_text_width)"
+    read -r left _ right < <(logo_padding)
+    total=$(( cols + left + right + box ))
+    margin=$(( (tcols - total) / 2 ))
+    (( margin < 0 )) && margin=0
+    # The area is only widened on the left: fastfetch already adds the right
+    # padding, so "cols + 2*margin" would push the box one margin too far.
+    printf '%s %s\n' "$(( cols + margin ))" "$margin"
+}
+
 # Widest line the module box actually prints (the disk/cpu rows are ~45
 # chars). Cached: one fastfetch run costs ~35 ms and the value only changes
 # when config.jsonc changes.
@@ -835,16 +853,17 @@ graphics_banner() {
 
     read -r pad_left pad_top pad_right < <(logo_padding)
     read -r cols lines < <(graphics_geometry "$image")
+    read -r area margin < <(logo_layout "$cols")
     blank="$CACHE_DIR/logo-blank.txt"
     mkdir -p "$CACHE_DIR" 2>/dev/null || true
     awk -v n="$lines" -v w="$cols" 'BEGIN { s = ""; for (i = 0; i < w; i++) s = s " "; for (j = 0; j < n; j++) print s }' > "$blank" 2>/dev/null || return 1
 
-    args=(--logo "$blank" --logo-type file-raw --logo-width "$cols")
+    args=(--logo "$blank" --logo-type file-raw --logo-width "$area")
 
     # The tag rows are printed by a child process that indents continuation
     # lines with a cursor-forward escape; it needs the real logo width or the
     # copyright/character lines end up inside the picture area.
-    export FASTFETCH_WAIFU_TEXT_COLUMN="$(text_column_for_width "$cols")"
+    export FASTFETCH_WAIFU_TEXT_COLUMN="$(text_column_for_width "$area")"
     write_banner_files
 
     # Single fastfetch pass: capture it to a temp file to learn the exact line
@@ -863,13 +882,10 @@ graphics_banner() {
     printf '\033[%dA\033[1G' "$lines_out"
     if (( pad_top )); then printf '\033[%dB' "$pad_top"; fi
 
-    # Centre the picture in the free space: a portrait image is narrower than
-    # the area, and without this it would hug the left edge with a big gap.
-    read -r maxc _ < <(logo_geometry)
-    # The logo area is exactly "cols" wide (fastfetch is told that width with
-    # --logo-width), so the picture starts at the left padding. Centring it in
-    # the old, wider area drew it on top of the module box.
-    hoffset="$pad_left"
+    # The banner is centred as a block: the logo area is "cols + 2*margin"
+    # wide, so the picture starts after the margin and the box ends up centred
+    # with it instead of hugging the left edge of a wide window.
+    hoffset=$(( pad_left + margin ))
     if (( hoffset )); then printf '\033[%dC' "$hoffset"; fi
 
     if ! kitty_image_escape_cached "$image" "$cols" "$lines"; then
@@ -951,8 +967,8 @@ prepare_next_banner() {
     LOGO_MAX_COLS="$(tag_width_cap "$tags")"
 
     read -r cols lines < <(graphics_geometry "$image")
-    read -r maxc _ < <(logo_geometry)
-    hoffset="$pad_left"
+    read -r area margin < <(logo_layout "$cols")
+    hoffset=$(( pad_left + margin ))
     entry="$PAINT_QUEUE/$(date +%s%N)"
 
     # Per-entry blank file: a shared one would be clobbered by the next
@@ -963,7 +979,7 @@ prepare_next_banner() {
     escf="$(escape_cache_file "$image" "$cols" "$lines")"
     kitty_image_escape_cached "$image" "$cols" "$lines" >/dev/null 2>&1 || return 1
 
-    text_col="$(text_column_for_width "$cols")"
+    text_col="$(text_column_for_width "$area")"
 
     # Tags carry newlines, so they cannot live in the single-line state file:
     # pre-format them into per-entry files the painter copies into place.

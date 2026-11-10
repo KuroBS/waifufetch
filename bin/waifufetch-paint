@@ -98,7 +98,13 @@ printf '%s/%s\n' "$bufn" "${bufsz:-50}" > "$banner/cache.txt" 2>/dev/null || tru
 out="$(mktemp --tmpdir="$cache" paint.XXXXXX 2>/dev/null)" || fallback "$@"
 
 printf '\033[2J\033[H'
-fastfetch --logo "$blank" --logo-type file-raw --logo-width "$cols" >"$out" 2>/dev/null
+# Same centring as the renderer: area = picture + the margin on both sides.
+# The horizontal padding is 1 (left) + 3 (right) in config.jsonc.
+total=$(( cols + 4 + box_w ))
+margin=$(( (tc_now - total) / 2 ))
+(( margin < 0 )) && margin=0
+area=$(( cols + margin ))
+fastfetch --logo "$blank" --logo-type file-raw --logo-width "$area" >"$out" 2>/dev/null
 rc=$?
 lines_out="$(wc -l < "$out" 2>/dev/null || printf '0')"
 [[ "$lines_out" =~ ^[0-9]+$ && "$lines_out" -gt 0 ]] || lines_out="$lines"
