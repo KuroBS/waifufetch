@@ -1402,15 +1402,17 @@ refresh_buffer_async() {
 terminal_key() {
     local t
 
+    # The tty comes first: kitty counts window ids per instance, so two kitty
+    # processes both have a window 1 and would share the record.
+    t="$(tty 2>/dev/null || true)"
+    case "$t" in
+        /dev/*) printf '%s\n' "${t//\//_}"; return 0 ;;
+    esac
     if [[ -n "${KITTY_WINDOW_ID:-}" ]]; then
         printf 'kitty-%s\n' "$KITTY_WINDOW_ID"
         return 0
     fi
-    t="$(tty 2>/dev/null || true)"
-    case "$t" in
-        /dev/*) printf '%s\n' "${t//\//_}" ;;
-        *) printf '%s\n' "" ;;
-    esac
+    printf '%s\n' ""
 }
 
 # Remember which picture this terminal is showing, so "--redraw" repaints the

@@ -82,10 +82,11 @@ fi
 
 # Remember which picture this window is showing, so "--redraw" repaints this
 # one and not whatever the newest global image happens to be.
-tkey="${KITTY_WINDOW_ID:+kitty-$KITTY_WINDOW_ID}"
+tnow="$(tty 2>/dev/null || true)"
+tkey=""
+case "$tnow" in /dev/*) tkey="${tnow//\//_}" ;; esac
 if [[ -z "$tkey" ]]; then
-    tnow="$(tty 2>/dev/null || true)"
-    case "$tnow" in /dev/*) tkey="${tnow//\//_}" ;; esac
+    tkey="${KITTY_WINDOW_ID:+kitty-$KITTY_WINDOW_ID}"
 fi
 if [[ -n "$tkey" ]]; then
     mkdir -p "$cache/terminals" 2>/dev/null || true
